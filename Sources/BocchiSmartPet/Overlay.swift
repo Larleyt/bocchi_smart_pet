@@ -337,7 +337,7 @@ final class PetOverlay {
         let dy = placement.y - from.y
         let distance = hypot(dx, dy)
         guard distance >= 1 else { return publish(placement: placement, generation: expected) }
-        let duration = min(1.2, max(0.22, distance / 650))
+        let duration = min(1.8, max(0.35, distance / 420))
         let started = clock()
         panel.movementDirection = dx >= 0 ? 1 : -1
         panel.acceptsPetInput = false

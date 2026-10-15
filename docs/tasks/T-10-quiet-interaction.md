@@ -24,14 +24,22 @@ SpriteView использует alpha текущего кадра: за пред
 
 Отрицательные проверки: baseline до исправления с новым stale-context assertion даёт **56 passed / 1 failed** (artifacts/20261016_013600_t10_stale/baseline-red.log); отдельные engine red ловят прежний center/roomiest, отсутствие inset/reserved tier и перепутанные Quartz bands (artifacts/T10-placement-policy-*-red.log). Exact-freeze scratch mutations дают **10/1** на instant teleport, **17/1** на отключённый native drag и **0/1** на нулевую hover delay. Raw logs, patches и SHA — artifacts/20261016_014528_interaction_mutations/README.md. Рабочие source/dist/разрешения при этих mutations не менялись.
 
-Нативная подписанная .app запущена из dist через LaunchServices: AX=true/screen=true/visualOptIn=true, shown(visual:true), первая точка(2452,658,84,156) — правое боковое поле с24pt отступом; повторные проверки delta=0 сохраняют позицию (artifacts/t10-final-live.log). В этом же процессе зарегистрированы настоящие dragBegan/dragChanged/dragEnded с ручной посадкой(2222,658) и(2060,708), затем hoverEscapeRequested и movementEnded: переезд(2144,962)→(2240,962),96pt. Эти события не инжектировались инструментом.
+Нативная подписанная .app запущена из dist через LaunchServices: AX=true/screen=true/visualOptIn=true, shown(visual:true), первая точка — правое боковое поле с24pt отступом; повторные проверки delta=0 сохраняют позицию (artifacts/t10-final-live.log). В этом же процессе зарегистрированы настоящие dragBegan/dragChanged/dragEnded с ручной посадкой, затем hoverEscapeRequested и movementEnded с переездом на96pt. Эти события не инжектировались инструментом.
 
-30s наблюдение только собственного CGWindow дало545 выборок,542visible,3absent,20 изменений фактического frame во время ручного drag (artifacts/t10-own-panel-watch.log). Краткое отсутствие совпало с подтверждённым локальным изменением: delta0.615 и obstacle=1 в01:55:41, а не с rejected stale result. Нулевое число скрытий для этой смешанной проверки не заявляется. Оператору предложено оценить настоящие клики/drag/hover и внешний вид; одобрение всех пунктов1–4 из отсутствия ответа не выводится.
+30s наблюдение только собственного CGWindow дало545 выборок,542visible,3absent,20 изменений фактического frame во время ручного drag (artifacts/t10-own-panel-watch.log). Краткое отсутствие совпало с подтверждённым локальным изменением: delta0.615 и obstacle=1, а не с rejected stale result. Нулевое число скрытий для этой смешанной проверки не заявляется. Ручная оценка настоящих кликов/drag/hover и внешнего вида остаётся отдельной от технических результатов.
 
-Итог независимого ревью artifacts/t10-review.md после проверки freeze, raw red, полного gate и signed live: **Ship, открытых Must/Should нет**. Проверенные изменения готовы к человеческой приёмке; новые направленные анимации до одобрения всех пунктов1–4 оператором не запускаются.
+Итог независимого ревью artifacts/t10-review.md после проверки freeze, raw red, полного gate и signed live: **Ship, открытых Must/Should нет**. Проверенные изменения готовы к ручной приёмке; новые направленные анимации до неё не запускаются.
+
+## Настройка скорости после приёмки взаимодействий
+
+Взаимодействия приняты, но побег оказался немного слишком быстрым. Длительность движения изменена с `min(1.2, max(0.22, distance / 650))` на `min(1.8, max(0.35, distance / 420))`: короткий переезд длится минимум0.35s, более длинные тоже примерно в1.5раза медленнее. Используются те же кадры бега; новых изображений нет.
+
+Новый runtime-сценарий проверяет настоящий NSPanel при коротком96pt побеге: через250ms окно остаётся видимым и находится между началом и целью. Старый тайминг даёт ожидаемый **13 passed / 1 failed** (artifacts/t10-speed-baseline-red.log). Полный gate нового кода: **22 XCTest + 125 runtime + 8 signing + 5 LaunchServices = 160 проверок, 0 failures**, exit0 (artifacts/t10-speed-final-check.log). Актуальные SHA8 файлов сохранены в artifacts/t10-speed-source-sha256.txt. Независимое follow-up ревью в artifacts/t10-review.md: **Ship, открытых Must/Should нет**.
+
+Подписанная .app с новым таймингом перезапущена через LaunchServices из dist, без стартового окна. Native trace подтверждает AX=true/screen=true/visualOptIn=true и shown(visual:true), затем повторные unchanged delta=0.000 (artifacts/t10-speed-live.log). Разрешения сохранены.
 
 ## Blocked / deferred
 
-T-11: новые прыжки вверх/вниз и варианты наклона для диагональных перемещений ждут явного одобрения всех пунктов1–4/T-10 оператором; изображений для них пока не создаётся. Полная cross-app/multi-display/Space матрица и универсальная точность определения custom JS controls не заявляются. Нативные клики через WindowServer требуют человеческой приёмки: тестовые NSEvent проходят тот же handler, но не заменяют реальное решение WindowServer о получателе клика.
+T-11: новые прыжки вверх/вниз и варианты наклона для диагональных перемещений ждут полной ручной приёмки T-10; изображений для них пока не создаётся. Полная cross-app/multi-display/Space матрица и универсальная точность определения custom JS controls не заявляются. Взаимодействия приняты; субъективная оценка темпа после замедления остаётся открытой.
 
 Откат — revert отдельного коммита T-10 и сборка с сохранённой .local-signing/; приложение остаётся в dist, TCC/автозапуск не менялись.

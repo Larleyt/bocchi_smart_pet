@@ -40,15 +40,25 @@ enum InteractionCheck {
         try check(intermediate.x > start.x && intermediate.x < end.x
                   && ScreenCoordinates.quartz(overlay.panel.frame) == intermediate,
                   "runtime NSPanel crosses an actual intermediate frame")
-        try await Task.sleep(for: .milliseconds(300))
+        try await Task.sleep(for: .milliseconds(600))
         try check(!overlay.isMoving && overlay.lastPlacement == end
                   && ScreenCoordinates.quartz(overlay.panel.frame) == end,
                   "runtime NSPanel finishes at the requested frame")
 
+        let shortEscape = PetRect(x: end.x + 96, y: end.y, width: end.width, height: end.height)
+        try check(overlay.move(to: shortEscape, generation: overlay.generation),
+                  "short escape starts with the existing run animation")
+        try await Task.sleep(for: .milliseconds(250))
+        try check(overlay.isMoving && overlay.panel.isVisible
+                  && overlay.displayedPlacement.map { $0.x > end.x && $0.x < shortEscape.x } == true,
+                  "short escape takes enough time to read as running")
+        try await Task.sleep(for: .milliseconds(400))
+        overlay.publish(placement: end, generation: overlay.generation)
+
         try check(overlay.move(to: start, generation: overlay.generation),
                   "soft-invalidation movement starts")
         overlay.invalidate(hiding: false)
-        try await Task.sleep(for: .milliseconds(400))
+        try await Task.sleep(for: .milliseconds(600))
         try check(!overlay.isMoving && overlay.lastPlacement == start,
                   "soft invalidation does not interrupt a safe run")
 
