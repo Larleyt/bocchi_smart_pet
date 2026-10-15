@@ -15,12 +15,26 @@ final class PlacementEngineTests: XCTestCase {
         XCTAssertTrue(rect.intersects(PetRect(x: 9, y: 14, width: 3, height: 3)))
     }
 
-    func testEmptyScreenChoosesBottomRightInQuartzCoordinates() {
+    func testEmptyScreenChoosesCenter() throws {
+        let screen = PetRect(x: 100, y: 50, width: 300, height: 200)
         let result = PlacementEngine.choose(
-            in: PetRect(x: 100, y: 50, width: 300, height: 200),
+            in: screen,
             avoiding: [], size: petSize, previous: nil
         )
-        XCTAssertEqual(result, PetRect(x: 360, y: 220, width: 40, height: 30))
+        let placed = try XCTUnwrap(result)
+        XCTAssertEqual(placed.x + placed.width / 2, screen.x + screen.width / 2, accuracy: 2)
+        XCTAssertEqual(placed.y + placed.height / 2, screen.y + screen.height / 2, accuracy: 2)
+    }
+
+    func testChoosesRoomyBackgroundInsteadOfSmallBottomRightPocket() throws {
+        let result = PlacementEngine.choose(
+            in: PetRect(x: 0, y: 0, width: 400, height: 240),
+            avoiding: [PetRect(x: 250, y: 0, width: 90, height: 240)],
+            size: petSize, previous: nil
+        )
+        let placed = try XCTUnwrap(result)
+        XCTAssertLessThan(placed.maxX, 238)
+        XCTAssertEqual(placed.y + placed.height / 2, 120, accuracy: 2)
     }
 
     func testSafePreviousPositionIsPreserved() {
@@ -63,13 +77,27 @@ final class PlacementEngineTests: XCTestCase {
         ))
     }
 
+    func testExactPetHeightCorridorRemainsUsable() {
+        let result = PlacementEngine.choose(
+            in: PetRect(x: 0, y: 0, width: 300, height: 120),
+            avoiding: [
+                PetRect(x: 0, y: 0, width: 300, height: 32),
+                PetRect(x: 0, y: 86, width: 300, height: 34)
+            ],
+            size: petSize, previous: nil
+        )
+        XCTAssertEqual(result?.y, 44)
+        XCTAssertEqual((result?.x ?? 0) + petSize.width / 2, 150, accuracy: 2)
+    }
+
     func testNegativeMonitorOriginAndOffscreenObstacle() {
         let result = PlacementEngine.choose(
             in: PetRect(x: -1_920, y: -100, width: 1_920, height: 1_080),
             avoiding: [PetRect(x: 100, y: 100, width: 500, height: 500)],
             size: PetSize(width: 100, height: 80), previous: nil
         )
-        XCTAssertEqual(result, PetRect(x: -100, y: 900, width: 100, height: 80))
+        XCTAssertEqual((result?.x ?? 0) + 50, -960, accuracy: 2)
+        XCTAssertEqual((result?.y ?? 0) + 40, 440, accuracy: 2)
     }
 
     func testInvalidOrOversizedGeometryReturnsNil() {

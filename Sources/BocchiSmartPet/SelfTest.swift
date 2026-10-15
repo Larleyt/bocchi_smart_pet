@@ -245,6 +245,14 @@ enum RuntimeSelfTest {
             _ = await runSession(knownSystem)
             try check(panel.lastPlacement == placement && capturedRegions.isEmpty,
                       "unchanged AX screen preserves placement without pixels")
+            let rightBlock = PetRect(x: 600, y: 0, width: 300, height: 440)
+            let roomySystem = SystemSnapshot(obstacles: [rightBlock], unknownAreas: [],
+                windows: [WindowRegion(id: 81, pid: 1, bounds: bounds)], accessibilityAvailable: true)
+            let roomyResult = await runSession(roomySystem)
+            try check(roomyResult == .shown(visual: false) && panel.panel.isVisible
+                      && panel.lastPlacement.map { $0.x > 180 && $0.maxX < 410 && $0.y > 180 && $0.maxY < 460 } == true
+                      && capturedRegions.isEmpty,
+                      "runtime chooses roomy left background over valid bottom-right pocket after map change")
             let emptyFrame = PetRect(x: 0, y: 0, width: 0, height: 0)
             let blockedAXFixtures: [(String, String, PetRect?)] = [
                 ("frameless AX obstacle", kAXButtonRole as String, nil),
@@ -288,6 +296,18 @@ enum RuntimeSelfTest {
             _ = await runSession(knownSystem)
             try check(panel.lastPlacement != afterCursor && panel.panel.isVisible && capturedRegions.isEmpty,
                       "canvas pan relocates after mouse-down already hid pet without new AX geometry")
+            guard let beforeWindowChurn = panel.lastPlacement else {
+                throw SelfTestFailure.failed("window churn relocation baseline missing")
+            }
+            _ = session.input(moved: false, contentMoved: false, cursor: outsideCursor)
+            _ = session.input(moved: false, contentMoved: true, cursor: outsideCursor)
+            let churnSystem = SystemSnapshot(obstacles: knownSystem.obstacles,
+                unknownAreas: knownSystem.unknownAreas,
+                windows: knownSystem.windows + [WindowRegion(id: 82, pid: 2,
+                    bounds: PetRect(x: 0, y: 0, width: 1, height: 1))], accessibilityAvailable: true)
+            _ = await runSession(churnSystem)
+            try check(panel.panel.isVisible && panel.lastPlacement != beforeWindowChurn,
+                      "pending relocation survives unrelated native window-list change")
             try check([NSEvent.EventType.scrollWheel, .leftMouseDragged, .rightMouseDragged,
                        .otherMouseDragged].allSatisfy(AppDelegate.isContentMovement)
                       && ![NSEvent.EventType.mouseMoved, .leftMouseDown, .otherMouseDown]
@@ -381,9 +401,9 @@ enum RuntimeSelfTest {
                 return try await analyzer.sample(image: crop, bounds: region)
             })
             try check(localResult == .shown(visual: true), "real local OCR finds a free region in unknown scene")
-            try check(capturedRegions.count >= 2 && capturedRegions.count <= 5
+            try check(capturedRegions.count >= 1 && capturedRegions.count <= 5
                       && capturedRegions.filter { $0 == bounds }.count <= 1,
-                      "static native button rejects occupied crops; full map remains bounded")
+                      "native image fixture search bounds local samples and full map")
             guard let localPlacement = panel.lastPlacement else { throw SelfTestFailure.failed("local placement missing") }
             try check(!protected.contains { $0.intersects(localPlacement) },
                       "zero activity does not permit placement over static native text or button")
@@ -415,6 +435,42 @@ enum RuntimeSelfTest {
                       "five-second watcher samples only occupied region")
 
             let white = try PixelFingerprint(rgb: [UInt8](repeating: 255, count: 300))
+            let wideUnknown = PetRect(x: 0, y: 0, width: 700, height: 640)
+            let mixedRoomSystem = SystemSnapshot(obstacles: [], unknownAreas: [wideUnknown],
+                windows: [WindowRegion(id: 83, pid: 1, bounds: bounds)], accessibilityAvailable: true)
+            capturedRegions = []
+            let narrowKnownResult = await runSession(mixedRoomSystem)
+            try check(narrowKnownResult == .shown(visual: false) && capturedRegions.isEmpty
+                      && panel.lastPlacement.map { $0.x >= wideUnknown.maxX + 12 } == true,
+                      "visual-off uses known AX strip without inspecting unknown canvas")
+            let roomVisualResult = await runSession(mixedRoomSystem, visual: true, pixels: {
+                PixelSample(bounds: $0, obstacles: [], fingerprint: white)
+            })
+            try check(roomVisualResult == .shown(visual: true) && panel.panel.isVisible
+                      && panel.lastPlacement.map { $0.maxX < wideUnknown.maxX } == true
+                      && !capturedRegions.isEmpty && !capturedRegions.contains(bounds),
+                      "turning visual opt-in on reconsiders known AX strip and locally verifies roomy canvas")
+            let rejectedRoomSystem = SystemSnapshot(obstacles: [], unknownAreas: [wideUnknown],
+                windows: [WindowRegion(id: 84, pid: 1, bounds: bounds)], accessibilityAvailable: true)
+            capturedRegions = []
+            let knownFallback = await runSession(rejectedRoomSystem, visual: true, pixels: {
+                PixelSample(bounds: $0, obstacles: [$0], fingerprint: white)
+            })
+            try check(knownFallback == .shown(visual: false) && panel.panel.isVisible
+                      && panel.lastPlacement.map { $0.x >= wideUnknown.maxX + 12 } == true
+                      && capturedRegions.count == 3 && !capturedRegions.contains(bounds),
+                      "known AX alternative avoids full screenshot after occupied local candidates")
+            let centerUnknown = PetRect(x: 390, y: 220, width: 130, height: 200)
+            let oneUnknownRoom = SystemSnapshot(obstacles: [], unknownAreas: [centerUnknown],
+                windows: [WindowRegion(id: 85, pid: 1, bounds: bounds)], accessibilityAvailable: true)
+            capturedRegions = []
+            let nextKnown = await runSession(oneUnknownRoom, visual: true, pixels: {
+                PixelSample(bounds: $0, obstacles: [$0], fingerprint: white)
+            })
+            try check(nextKnown == .shown(visual: false) && panel.panel.isVisible
+                      && capturedRegions.count == 1 && !capturedRegions.contains(bounds)
+                      && panel.lastPlacement.map { !$0.intersects(centerUnknown) } == true,
+                      "after unknown candidate rejects next known candidate needs no pixel capture")
             let canvasTree = inspectAXFixture(root: 0,
                 roles: [0: kAXGroupRole as String, 1: kAXImageRole as String, 2: kAXGroupRole as String],
                 frames: [1: bounds, 2: controlFrame], children: [0: [1, 2]],

@@ -62,12 +62,42 @@ public enum PlacementEngine {
             }
         }
 
-        for y in ys.indices.reversed() {
-            for x in xs.indices.reversed() where difference[y * stride + x] == 0 {
-                return PetRect(x: xs[x], y: ys[y], width: size.width, height: size.height)
+        var heights = [Int](repeating: 0, count: xs.count)
+        var stack: [Int] = []
+        stack.reserveCapacity(xs.count)
+        var best: FreeRectangle?
+
+        for y in ys.indices {
+            for x in xs.indices {
+                heights[x] = difference[y * stride + x] == 0 ? heights[x] + 1 : 0
+            }
+
+            stack.removeAll(keepingCapacity: true)
+            for boundary in 0...xs.count {
+                let height = boundary < xs.count ? heights[boundary] : 0
+                while let index = stack.last, heights[index] > height {
+                    stack.removeLast()
+                    let firstX = (stack.last ?? -1) + 1
+                    let lastX = boundary - 1
+                    let firstY = y - heights[index] + 1
+                    let area = (xs[lastX] - xs[firstX] + size.width)
+                        * (ys[y] - ys[firstY] + size.height)
+                    if area > (best?.area ?? 0) {
+                        best = FreeRectangle(
+                            firstX: firstX, lastX: lastX,
+                            firstY: firstY, lastY: y,
+                            area: area
+                        )
+                    }
+                }
+                if boundary < xs.count { stack.append(boundary) }
             }
         }
-        return nil
+
+        guard let best else { return nil }
+        let x = (best.firstX + best.lastX) / 2
+        let y = (best.firstY + best.lastY) / 2
+        return PetRect(x: xs[x], y: ys[y], width: size.width, height: size.height)
     }
 
     private static func coordinates(from minimum: Double, through maximum: Double) -> [Double] {
@@ -89,5 +119,13 @@ public enum PlacementEngine {
             }
         }
         return lower
+    }
+
+    private struct FreeRectangle {
+        let firstX: Int
+        let lastX: Int
+        let firstY: Int
+        let lastY: Int
+        let area: Double
     }
 }

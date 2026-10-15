@@ -19,6 +19,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var session: PlacementSession?
     private let startPaused: Bool
     private let diagnosePlacement: Bool
+    private let tracePlacement: Bool
     private let inspector = SystemInspector()
     private let analyzer = ScreenAnalyzer()
     private let changes = SystemChangeObserver()
@@ -42,19 +43,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var visualEnabled = UserDefaults.standard.bool(forKey: "visualFallbackEnabled")
     private var refreshTask: Task<Void, Never>?
     private var loggedOutcome: CaptureOutcome?
+    private var loggedPlacement: PetRect?
+    private var lastMovementLog = -Double.infinity
     private var diagnosticMap = ""
 
     init(startPaused: Bool = false, initialPermissions: PermissionState = .current,
-         diagnosePlacement: Bool = false) {
+         diagnosePlacement: Bool = false, tracePlacement: Bool = false) {
         self.startPaused = startPaused
         self.diagnosePlacement = diagnosePlacement
+        self.tracePlacement = tracePlacement || diagnosePlacement
         self.permissions = initialPermissions
         super.init()
         if diagnosePlacement { visualEnabled = false }
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        do { session = PlacementSession(overlay: try PetOverlay()) }
+        do { session = PlacementSession(overlay: try PetOverlay(), tracePlacement: tracePlacement) }
         catch {
             let alert = NSAlert()
             alert.messageText = "Не удалось запустить Боччи"
@@ -87,12 +91,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let events: NSEvent.EventTypeMask = [.leftMouseDown, .rightMouseDown,
             .otherMouseDown, .scrollWheel, .leftMouseDragged, .rightMouseDragged, .otherMouseDragged, .mouseMoved]
         globalMonitor = NSEvent.addGlobalMonitorForEvents(matching: events) { [weak self] event in
-            let moved = event.type == .mouseMoved
-            let contentMoved = Self.isContentMovement(event.type)
-            Task { @MainActor in self?.input(moved: moved, contentMoved: contentMoved) }
+            let type = event.type
+            Task { @MainActor in self?.input(type: type) }
         }
         localMonitor = NSEvent.addLocalMonitorForEvents(matching: events) { [weak self] event in
-            self?.input(moved: event.type == .mouseMoved, contentMoved: Self.isContentMovement(event.type))
+            self?.input(type: event.type)
             return event
         }
         for name in [NSWorkspace.didActivateApplicationNotification,
@@ -108,7 +111,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         heartbeat = Timer.scheduledTimer(withTimeInterval: 0.2, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated { self?.tick() }
         }
-        if !diagnosePlacement { showSetup() }
+        if !tracePlacement { showSetup() }
         tick()
     }
 
@@ -147,8 +150,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
-    private func input(moved: Bool, contentMoved: Bool) {
-        if session?.input(moved: moved, contentMoved: contentMoved, cursor: ScreenCoordinates.cursor) == true {
+    private func input(type: NSEvent.EventType) {
+        let contentMoved = Self.isContentMovement(type)
+        let now = ProcessInfo.processInfo.systemUptime
+        if tracePlacement, contentMoved, now - lastMovementLog >= 0.5 {
+            NSLog("Bocchi input: type=%@", String(describing: type))
+            lastMovementLog = now
+        }
+        if session?.input(moved: type == .mouseMoved, contentMoved: contentMoved, cursor: ScreenCoordinates.cursor) == true {
             pending = true
             lastInput = ProcessInfo.processInfo.systemUptime
         }
@@ -195,8 +204,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 inspect: {
                     let snapshot = try await self.inspector.inspect(
                         screenBounds: nextContext.bounds, windows: nextContext.windows)
-                    if self.diagnosePlacement {
-                        self.diagnosticMap = "AX=\(snapshot.accessibilityAvailable) windows=\(snapshot.windows.count) obstacles=\(snapshot.obstacles.count) unknown=\(snapshot.unknownAreas.count)"
+                    if self.tracePlacement {
+                        self.diagnosticMap = "AX=\(snapshot.accessibilityAvailable) screen=\(state.screenCapture) visualOptIn=\(visualPreference) windows=\(snapshot.windows.count) obstacles=\(snapshot.obstacles.count) unknown=\(snapshot.unknownAreas.count)"
                     }
                     return snapshot
                 },
@@ -209,9 +218,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                         && (try? self.currentContext()) == nextContext
                 },
                 cursor: { ScreenCoordinates.cursor })
-            if diagnosePlacement, outcome != loggedOutcome {
-                NSLog("Bocchi placement diagnostic: %@ %@", String(describing: outcome), diagnosticMap)
+            if tracePlacement, outcome != loggedOutcome || session.overlay.lastPlacement != loggedPlacement {
+                NSLog("Bocchi placement diagnostic: %@ position=%@ %@", String(describing: outcome),
+                      String(describing: session.overlay.lastPlacement), diagnosticMap)
                 loggedOutcome = outcome
+                loggedPlacement = session.overlay.lastPlacement
             }
             switch outcome {
             case .shown(let visual):
@@ -278,7 +289,8 @@ enum BocchiSmartPet {
             let grantedAccessibilityFixture = PermissionState(accessibility: true, screenCapture: false)
             let delegate = AppDelegate(startPaused: launchCheck,
                 initialPermissions: launchCheck ? grantedAccessibilityFixture : .current,
-                diagnosePlacement: CommandLine.arguments.contains("--diagnose-placement"))
+                diagnosePlacement: CommandLine.arguments.contains("--diagnose-placement"),
+                tracePlacement: CommandLine.arguments.contains("--trace-placement"))
             app.delegate = delegate
             if launchCheck {
                 Task { @MainActor in

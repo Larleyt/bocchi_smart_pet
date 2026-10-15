@@ -12,12 +12,15 @@ enum CaptureOutcome: Equatable {
 @MainActor
 final class PlacementSession {
     let overlay: PetOverlay
+    private let tracePlacement: Bool
     private(set) var enabled = true
     private(set) var busy = false
     private var previousSystem: SystemSnapshot?
     private var previousBounds: PetRect?
+    private var previousVisualAllowed: Bool?
     private var verified: Verification?
     private var activityAreas: [PetRect] = []
+    private var relocationPending = false
     private var searchExhausted = false
     private var lastFullCapture = -Double.infinity
 
@@ -29,7 +32,10 @@ final class PlacementSession {
         var checkedAt: Double
     }
 
-    init(overlay: PetOverlay) { self.overlay = overlay }
+    init(overlay: PetOverlay, tracePlacement: Bool = false) {
+        self.overlay = overlay
+        self.tracePlacement = tracePlacement
+    }
 
     static func cursorObstacle(_ cursor: PetPoint) -> PetRect {
         PetRect(x: cursor.x - 40, y: cursor.y - 40, width: 80, height: 80)
@@ -51,9 +57,14 @@ final class PlacementSession {
         } == true
         if moved && !contentMoved && !cursorCollision { return false }
         if (contentMoved || cursorCollision), let placement {
+            if tracePlacement, !activityAreas.contains(placement) {
+                NSLog("Bocchi relocation: contentMoved=%d cursorCollision=%d previous=%@", contentMoved,
+                      cursorCollision, String(describing: placement))
+            }
             activityAreas.removeAll { $0 == placement }
             activityAreas.append(placement)
             activityAreas = Array(activityAreas.suffix(8))
+            relocationPending = true
         }
         invalidate()
         return true
@@ -115,32 +126,51 @@ final class PlacementSession {
             let started = now()
             let system = try await inspect()
             guard relevant(), now() - started <= 2.5 else { return discard() }
-            let sceneChanged = previousBounds != bounds || previousSystem?.windows != system.windows
+            let boundsChanged = previousBounds != bounds
+            let windowsChanged = previousSystem?.windows != system.windows
+            let visualModeChanged = previousVisualAllowed != visualAllowed
+            let sceneChanged = boundsChanged || windowsChanged
             let contentsChanged = previousSystem?.obstacles != system.obstacles
                 || previousSystem?.unknownAreas != system.unknownAreas
                 || previousSystem?.accessibilityAvailable != system.accessibilityAvailable
-            if sceneChanged || contentsChanged {
+            if sceneChanged || contentsChanged || visualModeChanged {
                 verified = nil
                 searchExhausted = false
                 overlay.panel.orderOut(nil)
             }
-            if sceneChanged { activityAreas = [] }
+            if boundsChanged || (windowsChanged && !relocationPending) {
+                if tracePlacement, !activityAreas.isEmpty {
+                    NSLog("Bocchi activity reset: boundsChanged=%d oldWindows=%d newWindows=%d areas=%d",
+                          boundsChanged, previousSystem?.windows.count ?? 0, system.windows.count,
+                          activityAreas.count)
+                }
+                activityAreas = []
+            }
+            relocationPending = false
+            let mapUnchanged = !boundsChanged && !contentsChanged && !visualModeChanged
             previousBounds = bounds
             previousSystem = system
+            previousVisualAllowed = visualAllowed
             let obstacles = system.obstacles + [Self.cursorObstacle(cursor())] + activityAreas
-            if let known = PlacementEngine.choose(in: bounds, avoiding: obstacles + system.unknownAreas,
-                                                   size: PetOverlay.size, previous: overlay.lastPlacement) {
-                verified = nil
-                return show(known, visual: false)
-            }
-            if system.unknownAreas.isEmpty {
-                overlay.publish(placement: nil, generation: generation)
-                return .noSpace
-            }
-            guard visualAllowed else {
+            let previous = mapUnchanged ? overlay.lastPlacement : nil
+            if !visualAllowed {
+                if let known = PlacementEngine.choose(in: bounds, avoiding: obstacles + system.unknownAreas,
+                                                       size: PetOverlay.size, previous: previous) {
+                    verified = nil
+                    return show(known, visual: false)
+                }
                 verified = nil
                 overlay.publish(placement: nil, generation: generation)
                 return system.unknownAreas.isEmpty ? .noSpace : .needsVisualAccess
+            }
+            guard let preferred = PlacementEngine.choose(in: bounds, avoiding: obstacles,
+                                                          size: PetOverlay.size, previous: previous) else {
+                overlay.publish(placement: nil, generation: generation)
+                return .noSpace
+            }
+            if !Self.collides(preferred, with: system.unknownAreas) {
+                verified = nil
+                return show(preferred, visual: false)
             }
 
             if var verification = verified,
@@ -182,6 +212,9 @@ final class PlacementSession {
                     }
                     break
                 }
+                if !Self.collides(candidate, with: system.unknownAreas) {
+                    return show(candidate, visual: false)
+                }
                 let region = Self.region(around: candidate, in: screenBounds)
                 guard let sample = try await take(region) else { return discard() }
                 if !Self.collides(candidate, with: sample.obstacles) {
@@ -189,6 +222,13 @@ final class PlacementSession {
                     return show(candidate, visual: true)
                 }
                 rejected.append(candidate)
+            }
+
+            if let known = PlacementEngine.choose(in: bounds,
+                avoiding: obstacles + system.unknownAreas + rejected,
+                size: PetOverlay.size, previous: nil) {
+                verified = nil
+                return show(known, visual: false)
             }
 
             // A failed search waits for a scene/input change; the timer never repeats full-screen capture.
