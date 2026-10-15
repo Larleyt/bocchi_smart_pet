@@ -38,7 +38,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var observedAccessibility: Bool?
     private var lastInput = 0.0
     private var lastAttempt = -10.0
-    private var lastSuccess = -10.0
     private var permissions: PermissionState
     private var visualEnabled = UserDefaults.standard.bool(forKey: "visualFallbackEnabled")
     private var refreshTask: Task<Void, Never>?
@@ -72,7 +71,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             guard let self else { return }
             visualEnabled = enabled
             UserDefaults.standard.set(enabled, forKey: "visualFallbackEnabled")
-            invalidate()
+            invalidate(preservingVerification: false)
         }
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         item.button?.title = "♪"
@@ -103,11 +102,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                      NSWorkspace.screensDidWakeNotification] {
             observers.append(NSWorkspace.shared.notificationCenter.addObserver(
                 forName: name, object: nil, queue: .main
-            ) { [weak self] _ in MainActor.assumeIsolated { self?.invalidate() } })
+            ) { [weak self] _ in
+                MainActor.assumeIsolated { self?.invalidate(preservingVerification: false) }
+            })
         }
         observers.append(NotificationCenter.default.addObserver(
             forName: NSApplication.didChangeScreenParametersNotification, object: nil, queue: .main
-        ) { [weak self] _ in MainActor.assumeIsolated { self?.invalidate() } })
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.invalidate(preservingVerification: false) }
+        })
         heartbeat = Timer.scheduledTimer(withTimeInterval: 0.2, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated { self?.tick() }
         }
@@ -138,8 +141,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             windows: try SystemInspector.windows(in: bounds, excludingPID: ProcessInfo.processInfo.processIdentifier))
     }
 
-    private func invalidate() {
-        session?.invalidate()
+    private func invalidate(preservingVerification: Bool = true) {
+        session?.invalidate(preservingVerification: preservingVerification)
         pending = true
     }
 
@@ -165,7 +168,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private func tick() {
         let state = PermissionState.current
-        if state != permissions { permissions = state; invalidate() }
+        if state != permissions {
+            permissions = state
+            invalidate(preservingVerification: false)
+        }
         setup?.update(state: state, visualFallbackEnabled: visualEnabled)
         guard let session, session.enabled else { return }
         guard !menuOpen, setup?.isVisible != true else {
@@ -174,15 +180,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         let nextContext: DisplayContext
         do {
-            guard let value = try currentContext() else { invalidate(); return }
+            guard let value = try currentContext() else {
+                invalidate(preservingVerification: false)
+                return
+            }
             nextContext = value
         } catch {
-            invalidate()
+            invalidate(preservingVerification: false)
             statusLine.title = "Не удалось прочитать геометрию окон"
             NSLog("Bocchi window metadata failed: %@", error.localizedDescription)
             return
         }
-        if context != nextContext { context = nextContext; invalidate() }
+        if context != nextContext {
+            let sameDisplay = context?.id == nextContext.id && context?.bounds == nextContext.bounds
+            context = nextContext
+            invalidate(preservingVerification: sameDisplay)
+        }
         let identities = Set(nextContext.windows.map { WindowIdentity(id: $0.id, pid: $0.pid) })
         if observedWindows != identities || observedAccessibility != state.accessibility {
             changes.observe(pids: nextContext.windows.map(\.pid)) { [weak self] in self?.invalidate() }
@@ -190,7 +203,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             observedAccessibility = state.accessibility
         }
         let now = ProcessInfo.processInfo.systemUptime
-        if now - lastSuccess > 2.5 { session.overlay.panel.orderOut(nil) }
         guard !session.busy, now - lastInput >= 0.25,
               now - lastAttempt >= (pending ? 0.5 : 1.0) else { return }
         pending = false
@@ -226,15 +238,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             }
             switch outcome {
             case .shown(let visual):
-                lastSuccess = ProcessInfo.processInfo.systemUptime
                 statusLine.title = visual ? "Боччи проверяет только свой участок" : "Боччи использует системные данные"
             case .noSpace:
-                lastSuccess = ProcessInfo.processInfo.systemUptime
                 statusLine.title = "Место не найдено — Боччи скрыта"
             case .needsVisualAccess:
-                lastSuccess = ProcessInfo.processInfo.systemUptime
-                statusLine.title = state.accessibility
-                    ? "Неизвестная область — Боччи скрыта" : "Нужен Accessibility или визуальная проверка"
+                if visualPreference && !state.screenCapture {
+                    statusLine.title = "Screen Recording не разрешён для Боччи"
+                } else {
+                    statusLine.title = state.accessibility
+                        ? "Неизвестная область — Боччи скрыта" : "Нужен Accessibility или визуальная проверка"
+                }
             case .discarded:
                 pending = true
             case .failed(let detail):

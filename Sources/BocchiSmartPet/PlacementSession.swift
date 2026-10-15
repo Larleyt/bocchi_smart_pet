@@ -21,6 +21,7 @@ final class PlacementSession {
     private var verified: Verification?
     private var activityAreas: [PetRect] = []
     private var relocationPending = false
+    private var verificationRequired = false
     private var searchExhausted = false
     private var lastFullCapture = -Double.infinity
 
@@ -41,13 +42,21 @@ final class PlacementSession {
         PetRect(x: cursor.x - 40, y: cursor.y - 40, width: 80, height: 80)
     }
 
-    func invalidate() {
-        overlay.invalidate()
-        verified = nil
+    func invalidate(preservingVerification: Bool = true) {
+        overlay.invalidate(hiding: !preservingVerification)
+        if preservingVerification {
+            verificationRequired = verified != nil
+        } else {
+            verified = nil
+            verificationRequired = false
+        }
         searchExhausted = false
     }
 
-    func setEnabled(_ enabled: Bool) { self.enabled = enabled; invalidate() }
+    func setEnabled(_ enabled: Bool) {
+        self.enabled = enabled
+        invalidate(preservingVerification: false)
+    }
 
     @discardableResult
     func input(moved: Bool, contentMoved: Bool, cursor: PetPoint) -> Bool {
@@ -56,17 +65,19 @@ final class PlacementSession {
             Self.collides($0, with: [Self.cursorObstacle(cursor)])
         } == true
         if moved && !contentMoved && !cursorCollision { return false }
-        if (contentMoved || cursorCollision), let placement {
+        if cursorCollision, let placement {
             if tracePlacement, !activityAreas.contains(placement) {
-                NSLog("Bocchi relocation: contentMoved=%d cursorCollision=%d previous=%@", contentMoved,
-                      cursorCollision, String(describing: placement))
+                NSLog("Bocchi relocation: cursorCollision=1 previous=%@", String(describing: placement))
             }
             activityAreas.removeAll { $0 == placement }
             activityAreas.append(placement)
             activityAreas = Array(activityAreas.suffix(8))
             relocationPending = true
         }
-        invalidate()
+        if tracePlacement, contentMoved, verified != nil, !verificationRequired {
+            NSLog("Bocchi content movement: fresh local verification requested")
+        }
+        invalidate(preservingVerification: !cursorCollision)
         return true
     }
 
@@ -103,7 +114,7 @@ final class PlacementSession {
             enabled && !Task.isCancelled && current() && overlay.generation == generation
         }
         func discard() -> CaptureOutcome {
-            if overlay.generation == generation { invalidate() }
+            if overlay.generation == generation { invalidate(preservingVerification: false) }
             return .discarded
         }
         func show(_ rect: PetRect, visual: Bool) -> CaptureOutcome {
@@ -129,14 +140,20 @@ final class PlacementSession {
             let boundsChanged = previousBounds != bounds
             let windowsChanged = previousSystem?.windows != system.windows
             let visualModeChanged = previousVisualAllowed != visualAllowed
-            let sceneChanged = boundsChanged || windowsChanged
             let contentsChanged = previousSystem?.obstacles != system.obstacles
                 || previousSystem?.unknownAreas != system.unknownAreas
                 || previousSystem?.accessibilityAvailable != system.accessibilityAvailable
-            if sceneChanged || contentsChanged || visualModeChanged {
+            if boundsChanged || visualModeChanged {
                 verified = nil
+                verificationRequired = false
+            } else if windowsChanged || contentsChanged {
+                verificationRequired = verified != nil
+            }
+            if boundsChanged || visualModeChanged {
                 searchExhausted = false
                 overlay.panel.orderOut(nil)
+            } else if windowsChanged || contentsChanged {
+                searchExhausted = false
             }
             if boundsChanged || (windowsChanged && !relocationPending) {
                 if tracePlacement, !activityAreas.isEmpty {
@@ -147,19 +164,26 @@ final class PlacementSession {
                 activityAreas = []
             }
             relocationPending = false
-            let mapUnchanged = !boundsChanged && !contentsChanged && !visualModeChanged
             previousBounds = bounds
             previousSystem = system
             previousVisualAllowed = visualAllowed
             let obstacles = system.obstacles + [Self.cursorObstacle(cursor())] + activityAreas
-            let previous = mapUnchanged ? overlay.lastPlacement : nil
+            if overlay.lastPlacement.map({ Self.collides($0, with: system.obstacles) }) == true {
+                overlay.panel.orderOut(nil)
+            }
+            let previous = !boundsChanged && !visualModeChanged ? overlay.lastPlacement.flatMap {
+                bounds.contains($0) && !Self.collides($0, with: obstacles)
+                    && (visualAllowed || !Self.collides($0, with: system.unknownAreas)) ? $0 : nil
+            } : nil
             if !visualAllowed {
                 if let known = PlacementEngine.choose(in: bounds, avoiding: obstacles + system.unknownAreas,
                                                        size: PetOverlay.size, previous: previous) {
                     verified = nil
+                    verificationRequired = false
                     return show(known, visual: false)
                 }
                 verified = nil
+                verificationRequired = false
                 overlay.publish(placement: nil, generation: generation)
                 return system.unknownAreas.isEmpty ? .noSpace : .needsVisualAccess
             }
@@ -170,13 +194,15 @@ final class PlacementSession {
             }
             if !Self.collides(preferred, with: system.unknownAreas) {
                 verified = nil
+                verificationRequired = false
                 return show(preferred, visual: false)
             }
 
             if var verification = verified,
                bounds.contains(verification.placement),
                !Self.collides(verification.placement, with: obstacles) {
-                if now() - verification.checkedAt < 5 {
+                let forced = verificationRequired
+                if !forced, now() - verification.checkedAt < 5 {
                     return show(verification.placement, visual: true)
                 }
                 guard let sample = try await take(verification.region) else { return discard() }
@@ -189,14 +215,27 @@ final class PlacementSession {
                         verification.baselineAt = now()
                     }
                     verified = verification
+                    verificationRequired = false
+                    if tracePlacement, forced {
+                        NSLog("Bocchi content verification: unchanged delta=%.3f", delta)
+                    }
                     return show(verification.placement, visual: true)
+                }
+                if tracePlacement, forced {
+                    NSLog("Bocchi content verification: relocation delta=%@ obstacle=%d",
+                          delta.map { String(format: "%.3f", $0) } ?? "unavailable",
+                          Self.collides(verification.placement, with: sample.obstacles))
                 }
                 overlay.panel.orderOut(nil)
                 activityAreas.append(verification.placement)
                 activityAreas = Array(activityAreas.suffix(8))
                 verified = nil
+                verificationRequired = false
                 searchExhausted = false
-            } else { verified = nil }
+            } else {
+                verified = nil
+                verificationRequired = false
+            }
 
             guard !searchExhausted else {
                 overlay.publish(placement: nil, generation: generation)
@@ -213,6 +252,7 @@ final class PlacementSession {
                     break
                 }
                 if !Self.collides(candidate, with: system.unknownAreas) {
+                    verificationRequired = false
                     return show(candidate, visual: false)
                 }
                 let region = Self.region(around: candidate, in: screenBounds)
@@ -228,6 +268,7 @@ final class PlacementSession {
                 avoiding: obstacles + system.unknownAreas + rejected,
                 size: PetOverlay.size, previous: nil) {
                 verified = nil
+                verificationRequired = false
                 return show(known, visual: false)
             }
 
@@ -255,7 +296,7 @@ final class PlacementSession {
             return show(candidate, visual: true)
         } catch {
             guard relevant() else { return discard() }
-            invalidate()
+            invalidate(preservingVerification: false)
             return .failed(error.localizedDescription)
         }
     }

@@ -252,9 +252,8 @@ enum RuntimeSelfTest {
                 windows: [WindowRegion(id: 81, pid: 1, bounds: bounds)], accessibilityAvailable: true)
             let roomyResult = await runSession(roomySystem)
             try check(roomyResult == .shown(visual: false) && panel.panel.isVisible
-                      && panel.lastPlacement.map { $0.x > 180 && $0.maxX < 410 && $0.y > 180 && $0.maxY < 460 } == true
-                      && capturedRegions.isEmpty,
-                      "runtime chooses roomy left background over valid bottom-right pocket after map change")
+                      && panel.lastPlacement == placement && capturedRegions.isEmpty,
+                      "map change outside the pet preserves its safe AX-only position")
             let emptyFrame = PetRect(x: 0, y: 0, width: 0, height: 0)
             let blockedAXFixtures: [(String, String, PetRect?)] = [
                 ("frameless AX obstacle", kAXButtonRole as String, nil),
@@ -288,18 +287,21 @@ enum RuntimeSelfTest {
             }
             try check(afterCursor != placement && panel.panel.isVisible && capturedRegions.isEmpty,
                       "cursor collision relocates even after pointer has left")
-            _ = session.input(moved: false, contentMoved: false, cursor: outsideCursor)
+            try check(session.input(moved: false, contentMoved: false, cursor: outsideCursor)
+                      && panel.panel.isVisible,
+                      "ordinary click starts a soft refresh without hiding the pet")
             _ = await runSession(knownSystem)
             try check(panel.lastPlacement == afterCursor && panel.panel.isVisible,
                       "ordinary click preserves an otherwise safe position")
             _ = session.input(moved: false, contentMoved: false, cursor: outsideCursor)
-            try check(!panel.panel.isVisible, "mouse-down hides pet before canvas drag")
+            try check(panel.panel.isVisible, "mouse-down keeps the last safe placement visible")
             _ = session.input(moved: false, contentMoved: true, cursor: outsideCursor)
+            try check(panel.panel.isVisible, "canvas drag keeps the pet visible during verification")
             _ = await runSession(knownSystem)
-            try check(panel.lastPlacement != afterCursor && panel.panel.isVisible && capturedRegions.isEmpty,
-                      "canvas pan relocates after mouse-down already hid pet without new AX geometry")
+            try check(panel.lastPlacement == afterCursor && panel.panel.isVisible && capturedRegions.isEmpty,
+                      "AX-only canvas pan preserves a safe position without pixel capture")
             guard let beforeWindowChurn = panel.lastPlacement else {
-                throw SelfTestFailure.failed("window churn relocation baseline missing")
+                throw SelfTestFailure.failed("window churn stability baseline missing")
             }
             _ = session.input(moved: false, contentMoved: false, cursor: outsideCursor)
             _ = session.input(moved: false, contentMoved: true, cursor: outsideCursor)
@@ -308,8 +310,15 @@ enum RuntimeSelfTest {
                 windows: knownSystem.windows + [WindowRegion(id: 82, pid: 2,
                     bounds: PetRect(x: 0, y: 0, width: 1, height: 1))], accessibilityAvailable: true)
             _ = await runSession(churnSystem)
-            try check(panel.panel.isVisible && panel.lastPlacement != beforeWindowChurn,
-                      "pending relocation survives unrelated native window-list change")
+            try check(panel.panel.isVisible && panel.lastPlacement == beforeWindowChurn,
+                      "safe position survives unrelated native window-list change")
+            let blockedPositionSystem = SystemSnapshot(
+                obstacles: knownSystem.obstacles + [beforeWindowChurn], unknownAreas: [],
+                windows: [WindowRegion(id: 87, pid: 1, bounds: bounds)], accessibilityAvailable: true)
+            _ = await runSession(blockedPositionSystem)
+            try check(panel.panel.isVisible && panel.lastPlacement != beforeWindowChurn
+                      && capturedRegions.isEmpty,
+                      "new AX obstacle intersecting the pet forces relocation without pixel capture")
             try check([NSEvent.EventType.scrollWheel, .leftMouseDragged, .rightMouseDragged,
                        .otherMouseDragged].allSatisfy(AppDelegate.isContentMovement)
                       && ![NSEvent.EventType.mouseMoved, .leftMouseDown, .otherMouseDown]
@@ -374,11 +383,12 @@ enum RuntimeSelfTest {
             try check(session.busy, "production session marks in-flight metadata work")
             let duplicate = await runSession(knownSystem)
             try check(duplicate == .discarded, "concurrent refresh does not start a second inspection")
-            try check(session.input(moved: false, contentMoved: false, cursor: outsideCursor) && !panel.panel.isVisible,
-                      "input invalidates in-flight work")
+            try check(session.input(moved: false, contentMoved: false, cursor: outsideCursor)
+                      && panel.panel.isVisible,
+                      "soft input invalidates in-flight work without hiding a safe placement")
             let stale = await delayed.value
-            try check(stale == .discarded && !panel.panel.isVisible && !session.busy,
-                      "delayed completion cannot publish after input")
+            try check(stale == .discarded && panel.panel.isVisible && !session.busy,
+                      "delayed completion cannot publish or hide after soft input")
             _ = await runSession(knownSystem)
             let changedContext = await runSession(knownSystem, current: { false })
             try check(changedContext == .discarded && !panel.panel.isVisible,
@@ -482,8 +492,8 @@ enum RuntimeSelfTest {
             })
             try check(knownFallback == .shown(visual: false) && panel.panel.isVisible
                       && panel.lastPlacement.map { $0.x >= wideUnknown.maxX + 12 } == true
-                      && capturedRegions.count == 3 && !capturedRegions.contains(bounds),
-                      "known AX alternative avoids full screenshot after occupied local candidates")
+                      && capturedRegions.count == 4 && !capturedRegions.contains(bounds),
+                      "fresh verification plus local candidates reaches known AX alternative without full screenshot")
             let centerUnknown = PetRect(x: 390, y: 220, width: 130, height: 200)
             let oneUnknownRoom = SystemSnapshot(obstacles: [], unknownAreas: [centerUnknown],
                 windows: [WindowRegion(id: 85, pid: 1, bounds: bounds)], accessibilityAvailable: true)
@@ -492,9 +502,9 @@ enum RuntimeSelfTest {
                 PixelSample(bounds: $0, obstacles: [$0], fingerprint: white)
             })
             try check(nextKnown == .shown(visual: false) && panel.panel.isVisible
-                      && capturedRegions.count == 1 && !capturedRegions.contains(bounds)
+                      && capturedRegions.isEmpty
                       && panel.lastPlacement.map { !$0.intersects(centerUnknown) } == true,
-                      "after unknown candidate rejects next known candidate needs no pixel capture")
+                      "new unknown area outside a known-safe placement needs no pixel capture")
             let canvasTree = inspectAXFixture(root: 0,
                 roles: [0: kAXGroupRole as String, 1: kAXImageRole as String, 2: kAXGroupRole as String],
                 frames: [1: bounds, 2: controlFrame], children: [0: [1, 2]],
@@ -512,19 +522,37 @@ enum RuntimeSelfTest {
             guard let canvasPosition = panel.lastPlacement else {
                 throw SelfTestFailure.failed("verified canvas placement missing")
             }
+            let capturesBeforeStablePan = capturedRegions.count
             _ = session.input(moved: false, contentMoved: false, cursor: outsideCursor)
+            try check(panel.panel.isVisible, "click keeps verified canvas visible before drag")
+            session.invalidate()
+            try check(panel.panel.isVisible, "system invalidation keeps verified canvas visible")
             _ = session.input(moved: false, contentMoved: true, cursor: outsideCursor)
+            try check(panel.panel.isVisible, "content movement keeps verified canvas visible while sampling")
             let canvasMoved = await runSession(canvasSystem, visual: true, pixels: {
                 PixelSample(bounds: $0, obstacles: [], fingerprint: white)
             })
             try check(canvasShown == .shown(visual: true) && canvasMoved == .shown(visual: true)
-                      && panel.lastPlacement != canvasPosition && panel.panel.isVisible
-                      && !capturedRegions.isEmpty && !capturedRegions.contains(bounds)
+                      && panel.lastPlacement == canvasPosition && panel.panel.isVisible
+                      && capturedRegions.count == capturesBeforeStablePan + 1
+                      && capturedRegions.last != bounds
                       && panel.lastPlacement.map { !controlFrame.intersects($0) } == true,
-                      "canvas pan verifies new local background and avoids whole JS button without full screenshot")
+                      "unchanged canvas pan freshly verifies and preserves its local background")
             var changedRGB = [UInt8](repeating: 255, count: 300)
             for index in 0..<45 { changedRGB[index] = 0 }
             let changed = try PixelFingerprint(rgb: changedRGB)
+            guard let stableRegion = capturedRegions.last else {
+                throw SelfTestFailure.failed("stable pan local verification region missing")
+            }
+            _ = session.input(moved: false, contentMoved: false, cursor: outsideCursor)
+            _ = session.input(moved: false, contentMoved: true, cursor: outsideCursor)
+            let changedCanvas = await runSession(canvasSystem, visual: true, pixels: { region in
+                PixelSample(bounds: region, obstacles: [],
+                            fingerprint: region == stableRegion ? changed : white)
+            })
+            try check(changedCanvas == .shown(visual: true) && panel.panel.isVisible
+                      && panel.lastPlacement != canvasPosition && !capturedRegions.contains(bounds),
+                      "canvas pan relocates only after the local pixels materially change")
             capturedRegions = []
             _ = await runSession(unknownScene(11), visual: true, pixels: {
                 PixelSample(bounds: $0, obstacles: [], fingerprint: white)
@@ -558,9 +586,9 @@ enum RuntimeSelfTest {
             let exhausted = await runSession(unknownScene(13), visual: true, pixels: {
                 PixelSample(bounds: $0, obstacles: [$0], fingerprint: white)
             })
-            try check(exhausted == .noSpace && capturedRegions.count == 4
+            try check(exhausted == .noSpace && capturedRegions.count == 5
                       && capturedRegions.filter { $0 == bounds }.count == 1,
-                      "full map is captured once only after three rejected local candidates")
+                      "full map follows fresh verification and three rejected local candidates exactly once")
             let exhaustedCount = capturedRegions.count
             clock += 20
             _ = await runSession(unknownScene(13), visual: true)
@@ -577,6 +605,12 @@ enum RuntimeSelfTest {
             try check(limited == .noSpace && capturedRegions.count == 3 && !capturedRegions.contains(bounds),
                       "new scenes respect one-full-map-per-ten-second limit and remain hidden")
 
+            let staleBaseline = await runSession(unknownScene(18), visual: true, pixels: {
+                PixelSample(bounds: $0, obstacles: [], fingerprint: white)
+            })
+            try check(staleBaseline == .shown(visual: true) && panel.panel.isVisible,
+                      "stale-capture fixture starts from a verified visible placement")
+            _ = session.input(moved: false, contentMoved: true, cursor: outsideCursor)
             let delayedPixel = Task { @MainActor in
                 await runSession(unknownScene(18), visual: true, pixels: {
                     try await Task.sleep(for: .milliseconds(120))
@@ -584,10 +618,12 @@ enum RuntimeSelfTest {
                 })
             }
             await Task.yield()
-            _ = session.input(moved: false, contentMoved: false, cursor: outsideCursor)
+            try check(session.busy && panel.panel.isVisible,
+                      "verified placement remains visible during delayed local capture")
+            _ = session.input(moved: false, contentMoved: true, cursor: outsideCursor)
             let stalePixel = await delayedPixel.value
-            try check(stalePixel == .discarded && !panel.panel.isVisible && !session.busy,
-                      "delayed local pixel result cannot publish after input")
+            try check(stalePixel == .discarded && panel.panel.isVisible && !session.busy,
+                      "delayed local pixel result cannot publish or hide after content movement")
 
             _ = await runSession(knownSystem)
             let staleFailure = await session.refresh(bounds: bounds, screenBounds: bounds, visualAllowed: false,

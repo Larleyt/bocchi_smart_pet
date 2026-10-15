@@ -121,9 +121,9 @@ final class PetOverlay {
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary, .ignoresCycle]
     }
 
-    func invalidate() {
+    func invalidate(hiding: Bool = true) {
         generation &+= 1
-        panel.orderOut(nil)
+        if hiding { panel.orderOut(nil) }
     }
 
     @discardableResult
