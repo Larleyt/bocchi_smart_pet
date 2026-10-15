@@ -39,6 +39,7 @@ enum SystemInspectorError: Error, LocalizedError {
 }
 
 actor SystemInspector {
+    private var lastTraceSummary: String?
     private static let maximumWindows = 128
     private static let maximumAXNodes = 600
     private static let maximumAXDuration = Duration.milliseconds(220)
@@ -80,7 +81,21 @@ actor SystemInspector {
         }
     }
 
-    func inspect(screenBounds: PetRect, windows: [WindowRegion]) throws -> SystemSnapshot {
+    func inspect(screenBounds: PetRect, windows: [WindowRegion], trace: Bool = false) throws -> SystemSnapshot {
+        var reasons: [String: Int] = [:]
+        func report(_ reason: String, _ role: String? = nil) {
+            let key = reason + (role.map { "/" + $0 } ?? "")
+            reasons[key, default: 0] += 1
+        }
+        defer {
+            if trace {
+                let summary = reasons.keys.sorted().map { "\($0)=\(reasons[$0]!)" }.joined(separator: ",")
+                if summary != lastTraceSummary {
+                    NSLog("Bocchi AX reasons: %@", summary)
+                    lastTraceSummary = summary
+                }
+            }
+        }
         _ = Self.roleClassificationCheck
         try Self.validate(screenBounds)
         let clippedWindows = windows.compactMap { window -> WindowRegion? in
@@ -90,6 +105,7 @@ actor SystemInspector {
             )
         }
         guard AXIsProcessTrusted() else {
+            if trace { report("permission") }
             return SystemSnapshot(
                 obstacles: [],
                 unknownAreas: [screenBounds],
@@ -99,6 +115,7 @@ actor SystemInspector {
         }
         // shortcut: scenes above 128 windows stay unknown, replace rectangle splitting before raising the cap.
         guard clippedWindows.count <= Self.maximumWindows else {
+            if trace { report("window-budget") }
             return SystemSnapshot(
                 obstacles: [],
                 unknownAreas: [screenBounds],
@@ -110,6 +127,7 @@ actor SystemInspector {
         let visibility = Self.visibility(of: clippedWindows, in: screenBounds)
         let visibleRegions = visibility.windows
         var unknown = visibility.unknown
+        if trace, !unknown.isEmpty { report("unrepresented-regions") }
         var obstacles: [PetRect] = []
         var remainingNodes = Self.maximumAXNodes
         let clock = ContinuousClock()
@@ -121,6 +139,7 @@ actor SystemInspector {
                 continue
             }
             guard remainingNodes > 0, clock.now < deadline else {
+                if trace { report(remainingNodes <= 0 ? "node-budget" : "time-budget") }
                 unknown.append(contentsOf: visibleRegions[index])
                 continue
             }
@@ -129,9 +148,11 @@ actor SystemInspector {
                 pid: window.pid,
                 remainingNodes: &remainingNodes,
                 deadline: deadline,
-                clock: clock
+                clock: clock,
+                trace: trace ? report : nil
             )
             guard let match = Self.bestMatch(for: window.bounds, in: candidates) else {
+                if trace { report("window-mismatch") }
                 applicationWindows[window.pid] = candidates
                 unknown.append(contentsOf: visibleRegions[index])
                 continue
@@ -144,7 +165,8 @@ actor SystemInspector {
                 visibleRegions: visibleRegions[index],
                 remainingNodes: &remainingNodes,
                 deadline: deadline,
-                clock: clock
+                clock: clock,
+                trace: trace ? report : nil
             )
             obstacles.append(contentsOf: result.obstacles)
             unknown.append(contentsOf: result.unknown)
@@ -179,13 +201,14 @@ actor SystemInspector {
         pid: Int32,
         remainingNodes: inout Int,
         deadline: ContinuousClock.Instant,
-        clock: ContinuousClock
+        clock: ContinuousClock,
+        trace: ((String, String?) -> Void)? = nil
     ) -> [(AXUIElement, PetRect)] {
         let application = AXUIElementCreateApplication(pid_t(pid))
         guard AXUIElementSetMessagingTimeout(application, axMessageTimeout) == .success,
               clock.now < deadline,
               let elements = attribute(application, kAXWindowsAttribute as CFString) as? [AXUIElement]
-        else { return [] }
+        else { trace?("application-windows", nil); return [] }
         var windows: [(AXUIElement, PetRect)] = []
         for element in elements {
             guard remainingNodes > 0, clock.now < deadline else { break }
@@ -212,7 +235,8 @@ actor SystemInspector {
         visibleRegions: [PetRect],
         remainingNodes: inout Int,
         deadline: ContinuousClock.Instant,
-        clock: ContinuousClock
+        clock: ContinuousClock,
+        trace: ((String, String?) -> Void)? = nil
     ) -> (obstacles: [PetRect], unknown: [PetRect], complete: Bool) {
         inspectTree(
             root: root,
@@ -223,7 +247,8 @@ actor SystemInspector {
             readVisibility: { visibility(of: $0) },
             readFrame: { frame(of: $0, deadline: deadline, clock: clock) },
             readChildren: { children(of: $0) },
-            readActions: { actions(of: $0) }
+            readActions: { actions(of: $0, trace: trace) },
+            trace: trace
         )
     }
 
@@ -236,39 +261,47 @@ actor SystemInspector {
         readVisibility: (Element) -> Visibility,
         readFrame: (Element) -> AccessibilityFrame,
         readChildren: (Element) -> ChildrenResult<Element>,
-        readActions: (Element) -> [String]?
+        readActions: (Element) -> [String]?,
+        trace: ((String, String?) -> Void)? = nil
     ) -> (obstacles: [PetRect], unknown: [PetRect], complete: Bool) {
         var queue = [root]
         var cursor = 0
         var obstacles: [PetRect] = []
         var unknown: [PetRect] = []
 
+        func incomplete(_ reason: String, _ role: String? = nil)
+            -> (obstacles: [PetRect], unknown: [PetRect], complete: Bool) {
+            trace?(reason, role)
+            return (obstacles, unknown, false)
+        }
         while cursor < queue.count {
-            guard remainingNodes > 0, !isExpired() else { return (obstacles, unknown, false) }
+            guard remainingNodes > 0, !isExpired() else {
+                return incomplete(remainingNodes <= 0 ? "node-budget" : "time-budget")
+            }
             remainingNodes -= 1
             let element = queue[cursor]
             cursor += 1
 
             guard !isExpired(), let role = readRole(element) else {
-                return (obstacles, unknown, false)
+                return incomplete(isExpired() ? "time-budget" : "role")
             }
-            guard !isExpired() else { return (obstacles, unknown, false) }
+            guard !isExpired() else { return incomplete("time-budget", role) }
             switch readVisibility(element) {
             case .hidden:
                 continue
             case .failed:
-                return (obstacles, unknown, false)
+                return incomplete("visibility", role)
             case .visible:
                 break
             }
             let elementKind = kind(for: role)
             if elementKind != .obstacle {
                 guard !isExpired(), let actions = readActions(element), !isExpired() else {
-                    return (obstacles, unknown, false)
+                    return incomplete(isExpired() ? "time-budget" : "actions", role)
                 }
                 if hasActivatingAction(actions) {
                     guard case .visible(let rect) = readFrame(element), !isExpired() else {
-                        return (obstacles, unknown, false)
+                        return incomplete(isExpired() ? "time-budget" : "action-frame", role)
                     }
                     obstacles.append(contentsOf: clip(rect, to: visibleRegions))
                     continue
@@ -277,44 +310,47 @@ actor SystemInspector {
             switch elementKind {
             case .obstacle:
                 guard !isExpired(), case .visible(let rect) = readFrame(element) else {
-                    return (obstacles, unknown, false)
+                    return incomplete(isExpired() ? "time-budget" : "obstacle-frame", role)
                 }
                 obstacles.append(contentsOf: clip(rect, to: visibleRegions))
                 continue
             case .unknown:
                 guard !isExpired(), case .visible(let rect) = readFrame(element) else {
-                    return (obstacles, unknown, false)
+                    return incomplete(isExpired() ? "time-budget" : "unknown-frame", role)
                 }
+                trace?("unknown-role", role)
                 unknown.append(contentsOf: clip(rect, to: visibleRegions))
                 continue
             case .container:
                 break
             }
 
-            guard !isExpired() else { return (obstacles, unknown, false) }
+            guard !isExpired() else { return incomplete("time-budget", role) }
             switch readChildren(element) {
             case .available(let children) where !children.isEmpty:
                 if queue.count - cursor + children.count > remainingNodes {
-                    return (obstacles, unknown, false)
+                    return incomplete("queue-budget", role)
                 }
                 queue.append(contentsOf: children)
             case .available:
-                guard !isExpired() else { return (obstacles, unknown, false) }
+                guard !isExpired() else { return incomplete("time-budget", role) }
                 switch readFrame(element) {
                 case .empty:
                     continue
                 case .visible(let rect):
+                    trace?("empty-container", role)
                     unknown.append(contentsOf: clip(rect, to: visibleRegions))
                 case .unavailable:
-                    return (obstacles, unknown, false)
+                    return incomplete("container-frame", role)
                 }
             case .unsupported:
                 guard !isExpired(), case .visible(let rect) = readFrame(element) else {
-                    return (obstacles, unknown, false)
+                    return incomplete(isExpired() ? "time-budget" : "unsupported-frame", role)
                 }
+                trace?("unsupported-children", role)
                 unknown.append(contentsOf: clip(rect, to: visibleRegions))
             case .failed:
-                return (obstacles, unknown, false)
+                return incomplete("children", role)
             }
         }
         return (obstacles, unknown, true)
@@ -370,9 +406,13 @@ actor SystemInspector {
         }
     }
 
-    private static func actions(of element: AXUIElement) -> [String]? {
+    private static func actions(
+        of element: AXUIElement, trace: ((String, String?) -> Void)? = nil
+    ) -> [String]? {
         var value: CFArray?
-        guard AXUIElementCopyActionNames(element, &value) == .success,
+        let error = AXUIElementCopyActionNames(element, &value)
+        if error != .success { trace?("actions-error-\(error.rawValue)", nil) }
+        guard error == .success,
               let value, let actions = value as? [String]
         else { return nil }
         return actions

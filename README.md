@@ -54,3 +54,5 @@ Runtime-проверки кратко показывают собственны�
 Для диагностики есть аргумент `--diagnose-placement`: обычный поиск запускается сразу, визуальный fallback запрещён, а изменения исхода и счётчики AX пишутся в stderr без текста/URL/пикселей. Реальный AX-only показ и исправление структурных групп с рамкой 0×0 описаны в [T-5](docs/tasks/T-5-live-placement.md).
 
 `--trace-placement` запускает поиск с обычной сохранённой visual preference и без стартового setup. Он пишет тип content-movement события (не чаще двух раз в секунду), смены позиции/исхода, причины сброса activity areas и реальные permission booleans в stderr; клавиши, текст, URL и пиксели в trace не пишутся. В отличие от AX-only диагностики этот режим не запрещает opt-in visual fallback. Подробности изменения выбора места — [T-7](docs/tasks/T-7-live-pan.md).
+
+В trace mode теперь видны причины AX unknown, включая пустой container, неподдерживаемые children и прерывание обхода. Диагностика конкретного полноэкранного окна и необходимый ручной шаг для visual fallback записаны в [T-8](docs/tasks/T-8-fullscreen-accessibility.md).

@@ -203,7 +203,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 bounds: nextContext.usable, screenBounds: nextContext.bounds, visualAllowed: visualAllowed,
                 inspect: {
                     let snapshot = try await self.inspector.inspect(
-                        screenBounds: nextContext.bounds, windows: nextContext.windows)
+                        screenBounds: nextContext.bounds, windows: nextContext.windows, trace: self.tracePlacement)
                     if self.tracePlacement {
                         self.diagnosticMap = "AX=\(snapshot.accessibilityAvailable) screen=\(state.screenCapture) visualOptIn=\(visualPreference) windows=\(snapshot.windows.count) obstacles=\(snapshot.obstacles.count) unknown=\(snapshot.unknownAreas.count)"
                     }

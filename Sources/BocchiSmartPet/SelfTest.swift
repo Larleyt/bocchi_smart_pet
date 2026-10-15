@@ -186,7 +186,8 @@ enum RuntimeSelfTest {
                 frames: [Int: PetRect],
                 children: [Int: [Int]] = [:],
                 actions: [Int: [String]] = [:],
-                actionFailures: Set<Int> = []
+                actionFailures: Set<Int> = [],
+                trace: ((String, String?) -> Void)? = nil
             ) -> (obstacles: [PetRect], unknown: [PetRect], complete: Bool) {
                 var remainingNodes = 16
                 return SystemInspector.inspectTree(
@@ -201,7 +202,8 @@ enum RuntimeSelfTest {
                         return SystemInspector.accessibilityFrame(rect)
                     },
                     readChildren: { .available(children[$0] ?? []) },
-                    readActions: { actionFailures.contains($0) ? nil : actions[$0] ?? [] }
+                    readActions: { actionFailures.contains($0) ? nil : actions[$0] ?? [] },
+                    trace: trace
                 )
             }
             func systemSnapshot(
@@ -435,6 +437,28 @@ enum RuntimeSelfTest {
                       "five-second watcher samples only occupied region")
 
             let white = try PixelFingerprint(rgb: [UInt8](repeating: 255, count: 300))
+            var opaqueReasons: [String] = []
+            let opaqueTree = inspectAXFixture(root: 0,
+                roles: [0: kAXWindowRole as String, 1: kAXButtonRole as String,
+                        2: kAXButtonRole as String, 3: kAXButtonRole as String, 4: kAXGroupRole as String],
+                frames: [0: bounds, 1: PetRect(x: 10, y: 10, width: 12, height: 12),
+                         2: PetRect(x: 30, y: 10, width: 12, height: 12),
+                         3: PetRect(x: 50, y: 10, width: 12, height: 12), 4: bounds],
+                children: [0: [1, 2, 3, 4]],
+                trace: { reason, role in opaqueReasons.append(reason + "/" + (role ?? "none")) })
+            let opaqueSystem = systemSnapshot(opaqueTree, id: 86)
+            capturedRegions = []
+            let opaqueDenied = await runSession(opaqueSystem)
+            try check(opaqueTree.complete && opaqueTree.obstacles.count == 3
+                      && opaqueTree.unknown == [bounds] && opaqueReasons == ["empty-container/AXGroup"]
+                      && opaqueDenied == .needsVisualAccess && !panel.panel.isVisible && capturedRegions.isEmpty,
+                      "live-shaped opaque AX group is diagnosed without treating its contents as empty")
+            let opaqueAllowed = await runSession(opaqueSystem, visual: true, pixels: {
+                PixelSample(bounds: $0, obstacles: [], fingerprint: white)
+            })
+            try check(opaqueAllowed == .shown(visual: true) && panel.panel.isVisible
+                      && capturedRegions.count == 1 && !capturedRegions.contains(bounds),
+                      "explicit visual permission resolves live-shaped opaque group using one local crop")
             let wideUnknown = PetRect(x: 0, y: 0, width: 700, height: 640)
             let mixedRoomSystem = SystemSnapshot(obstacles: [], unknownAreas: [wideUnknown],
                 windows: [WindowRegion(id: 83, pid: 1, bounds: bounds)], accessibilityAvailable: true)
