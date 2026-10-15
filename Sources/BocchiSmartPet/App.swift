@@ -18,6 +18,7 @@ private struct WindowIdentity: Hashable {
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var session: PlacementSession?
     private let startPaused: Bool
+    private let diagnosePlacement: Bool
     private let inspector = SystemInspector()
     private let analyzer = ScreenAnalyzer()
     private let changes = SystemChangeObserver()
@@ -40,11 +41,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var permissions: PermissionState
     private var visualEnabled = UserDefaults.standard.bool(forKey: "visualFallbackEnabled")
     private var refreshTask: Task<Void, Never>?
+    private var loggedOutcome: CaptureOutcome?
+    private var diagnosticMap = ""
 
-    init(startPaused: Bool = false, initialPermissions: PermissionState = .current) {
+    init(startPaused: Bool = false, initialPermissions: PermissionState = .current,
+         diagnosePlacement: Bool = false) {
         self.startPaused = startPaused
+        self.diagnosePlacement = diagnosePlacement
         self.permissions = initialPermissions
         super.init()
+        if diagnosePlacement { visualEnabled = false }
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -101,7 +107,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         heartbeat = Timer.scheduledTimer(withTimeInterval: 0.2, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated { self?.tick() }
         }
-        showSetup()
+        if !diagnosePlacement { showSetup() }
         tick()
     }
 
@@ -131,7 +137,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func invalidate() {
         session?.invalidate()
         pending = true
-        lastInput = ProcessInfo.processInfo.systemUptime
     }
 
     private func input(moved: Bool) {
@@ -174,12 +179,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         pending = false
         lastAttempt = now
         let visualPreference = visualEnabled
-        let visualAllowed = visualPreference && state.screenCapture
+        let visualAllowed = !diagnosePlacement && visualPreference && state.screenCapture
         refreshTask = Task { [weak self] in
             guard let self else { return }
             let outcome = await session.refresh(
                 bounds: nextContext.usable, screenBounds: nextContext.bounds, visualAllowed: visualAllowed,
-                inspect: { try await self.inspector.inspect(screenBounds: nextContext.bounds, windows: nextContext.windows) },
+                inspect: {
+                    let snapshot = try await self.inspector.inspect(
+                        screenBounds: nextContext.bounds, windows: nextContext.windows)
+                    if self.diagnosePlacement {
+                        self.diagnosticMap = "AX=\(snapshot.accessibilityAvailable) windows=\(snapshot.windows.count) obstacles=\(snapshot.obstacles.count) unknown=\(snapshot.unknownAreas.count)"
+                    }
+                    return snapshot
+                },
                 capture: { region in
                     try await self.analyzer.capture(displayID: nextContext.id, screenBounds: nextContext.bounds,
                         region: region, ownBundleID: Bundle.main.bundleIdentifier ?? "local.bocchi.smartpet")
@@ -189,6 +201,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                         && (try? self.currentContext()) == nextContext
                 },
                 cursor: { ScreenCoordinates.cursor })
+            if diagnosePlacement, outcome != loggedOutcome {
+                NSLog("Bocchi placement diagnostic: %@ %@", String(describing: outcome), diagnosticMap)
+                loggedOutcome = outcome
+            }
             switch outcome {
             case .shown(let visual):
                 lastSuccess = ProcessInfo.processInfo.systemUptime
@@ -253,7 +269,8 @@ enum BocchiSmartPet {
             let launchCheck = CommandLine.arguments.contains("--launch-check")
             let grantedAccessibilityFixture = PermissionState(accessibility: true, screenCapture: false)
             let delegate = AppDelegate(startPaused: launchCheck,
-                initialPermissions: launchCheck ? grantedAccessibilityFixture : .current)
+                initialPermissions: launchCheck ? grantedAccessibilityFixture : .current,
+                diagnosePlacement: CommandLine.arguments.contains("--diagnose-placement"))
             app.delegate = delegate
             if launchCheck {
                 Task { @MainActor in

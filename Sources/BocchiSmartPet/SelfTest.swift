@@ -167,8 +167,6 @@ enum RuntimeSelfTest {
             let snapshot = try await analyzer.analyze(image: image, screenBounds: bounds, controls: [fakeAXButton])
             try check(snapshot.obstacles.contains(fakeAXButton), "external AX fixture reaches obstacle map")
             let outsideCursor = PetPoint(x: -1000, y: -1000)
-            let knownSystem = SystemSnapshot(obstacles: [knownText, fakeAXButton], unknownAreas: [],
-                windows: [WindowRegion(id: 1, pid: 1, bounds: bounds)], accessibilityAvailable: true)
             var capturedRegions: [PetRect] = []
             var clock = 100.0
             func runSession(_ system: SystemSnapshot, visual: Bool = false,
@@ -182,13 +180,54 @@ enum RuntimeSelfTest {
                         return try await pixels(region)
                     }, current: current, cursor: { outsideCursor }, now: { clock })
             }
+            func inspectAXFixture(
+                root: Int,
+                roles: [Int: String],
+                frames: [Int: PetRect],
+                children: [Int: [Int]] = [:]
+            ) -> (obstacles: [PetRect], unknown: [PetRect], complete: Bool) {
+                var remainingNodes = 16
+                return SystemInspector.inspectTree(
+                    root: root,
+                    visibleRegions: [bounds],
+                    remainingNodes: &remainingNodes,
+                    isExpired: { false },
+                    readRole: { roles[$0] },
+                    readVisibility: { _ in .visible },
+                    readFrame: { element in
+                        guard let rect = frames[element] else { return .unavailable }
+                        return SystemInspector.accessibilityFrame(rect)
+                    },
+                    readChildren: { .available(children[$0] ?? []) }
+                )
+            }
+            func systemSnapshot(
+                _ tree: (obstacles: [PetRect], unknown: [PetRect], complete: Bool),
+                id: UInt32
+            ) -> SystemSnapshot {
+                SystemSnapshot(
+                    obstacles: tree.obstacles,
+                    unknownAreas: tree.unknown + (tree.complete ? [] : [bounds]),
+                    windows: [WindowRegion(id: id, pid: 1, bounds: bounds)],
+                    accessibilityAvailable: true
+                )
+            }
+            let structuralTree = inspectAXFixture(
+                root: 0,
+                roles: [0: kAXGroupRole as String, 1: kAXStaticTextRole as String,
+                        2: kAXButtonRole as String, 3: kAXGroupRole as String],
+                frames: [1: knownText, 2: fakeAXButton, 3: PetRect(x: 0, y: 0, width: 0, height: 0)],
+                children: [0: [1, 2, 3]]
+            )
+            let knownSystem = systemSnapshot(structuralTree, id: 30)
             func unknownScene(_ id: UInt32) -> SystemSnapshot {
                 SystemSnapshot(obstacles: [], unknownAreas: [bounds],
                     windows: [WindowRegion(id: id, pid: 1, bounds: bounds)], accessibilityAvailable: false)
             }
             let outcome = await runSession(knownSystem)
-            try check(outcome == .shown(visual: false) && capturedRegions.isEmpty,
-                      "AX-only runtime publishes without permission or any pixel capture")
+            try check(structuralTree.complete && structuralTree.unknown.isEmpty
+                      && outcome == .shown(visual: false) && capturedRegions.isEmpty,
+                      "frameless AX group reaches AX-only placement without pixel capture")
             guard let placement = panel.lastPlacement else {
                 throw SelfTestFailure.failed("sparse native fixture has a visible placement")
             }
@@ -203,6 +242,27 @@ enum RuntimeSelfTest {
             _ = await runSession(knownSystem)
             try check(panel.lastPlacement == placement && capturedRegions.isEmpty,
                       "unchanged AX screen preserves placement without pixels")
+            let emptyFrame = PetRect(x: 0, y: 0, width: 0, height: 0)
+            let blockedAXFixtures: [(String, String, PetRect?)] = [
+                ("frameless AX obstacle", kAXButtonRole as String, nil),
+                ("frameless unknown AX role", "AXFutureWidget", nil),
+                ("empty frameless AX container", kAXGroupRole as String, nil),
+                ("zero-sized AX obstacle", kAXButtonRole as String, emptyFrame),
+                ("zero-sized unknown AX role", "AXFutureWidget", emptyFrame),
+                ("negative AX frame", kAXButtonRole as String, PetRect(x: 0, y: 0, width: -1, height: 80)),
+                ("nonfinite AX frame", kAXButtonRole as String, PetRect(x: .nan, y: 0, width: 80, height: 80)),
+            ]
+            for (index, fixture) in blockedAXFixtures.enumerated() {
+                let frames = fixture.2.map { [0: $0] } ?? [:]
+                let tree = inspectAXFixture(root: 0, roles: [0: fixture.1], frames: frames)
+                capturedRegions = []
+                let blocked = await runSession(systemSnapshot(tree, id: UInt32(40 + index)))
+                try check(!tree.complete && blocked == .needsVisualAccess
+                          && capturedRegions.isEmpty && !panel.panel.isVisible,
+                          "\(fixture.0) remains blocked without screen capture")
+            }
+            capturedRegions = []
+            _ = await runSession(knownSystem)
             let away = PetPoint(x: placement.maxX + 53, y: placement.y + placement.height / 2)
             try check(!session.input(moved: true, cursor: away) && panel.panel.isVisible,
                       "cursor outside clearance keeps panel stable")

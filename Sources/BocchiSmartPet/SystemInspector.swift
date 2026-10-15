@@ -190,7 +190,7 @@ actor SystemInspector {
         for element in elements {
             guard remainingNodes > 0, clock.now < deadline else { break }
             remainingNodes -= 1
-            if let frame = frame(of: element, deadline: deadline, clock: clock) {
+            if case .visible(let frame) = frame(of: element, deadline: deadline, clock: clock) {
                 windows.append((element, frame))
             }
         }
@@ -214,26 +214,44 @@ actor SystemInspector {
         deadline: ContinuousClock.Instant,
         clock: ContinuousClock
     ) -> (obstacles: [PetRect], unknown: [PetRect], complete: Bool) {
+        inspectTree(
+            root: root,
+            visibleRegions: visibleRegions,
+            remainingNodes: &remainingNodes,
+            isExpired: { clock.now >= deadline },
+            readRole: { attribute($0, kAXRoleAttribute as CFString) as? String },
+            readVisibility: { visibility(of: $0) },
+            readFrame: { frame(of: $0, deadline: deadline, clock: clock) },
+            readChildren: { children(of: $0) }
+        )
+    }
+
+    nonisolated static func inspectTree<Element>(
+        root: Element,
+        visibleRegions: [PetRect],
+        remainingNodes: inout Int,
+        isExpired: () -> Bool,
+        readRole: (Element) -> String?,
+        readVisibility: (Element) -> Visibility,
+        readFrame: (Element) -> AccessibilityFrame,
+        readChildren: (Element) -> ChildrenResult<Element>
+    ) -> (obstacles: [PetRect], unknown: [PetRect], complete: Bool) {
         var queue = [root]
         var cursor = 0
         var obstacles: [PetRect] = []
         var unknown: [PetRect] = []
 
         while cursor < queue.count {
-            guard remainingNodes > 0, clock.now < deadline else {
-                return (obstacles, unknown, false)
-            }
+            guard remainingNodes > 0, !isExpired() else { return (obstacles, unknown, false) }
             remainingNodes -= 1
             let element = queue[cursor]
             cursor += 1
 
-            guard clock.now < deadline,
-                  let role = attribute(element, kAXRoleAttribute as CFString) as? String
-            else {
+            guard !isExpired(), let role = readRole(element) else {
                 return (obstacles, unknown, false)
             }
-            guard clock.now < deadline else { return (obstacles, unknown, false) }
-            switch visibility(of: element) {
+            guard !isExpired() else { return (obstacles, unknown, false) }
+            switch readVisibility(element) {
             case .hidden:
                 continue
             case .failed:
@@ -241,30 +259,44 @@ actor SystemInspector {
             case .visible:
                 break
             }
-            guard let rect = frame(of: element, deadline: deadline, clock: clock) else {
-                return (obstacles, unknown, false)
-            }
             switch kind(for: role) {
             case .obstacle:
+                guard !isExpired(), case .visible(let rect) = readFrame(element) else {
+                    return (obstacles, unknown, false)
+                }
                 obstacles.append(contentsOf: clip(rect, to: visibleRegions))
                 continue
             case .unknown:
+                guard !isExpired(), case .visible(let rect) = readFrame(element) else {
+                    return (obstacles, unknown, false)
+                }
                 unknown.append(contentsOf: clip(rect, to: visibleRegions))
                 continue
             case .container:
                 break
             }
 
-            guard clock.now < deadline else { return (obstacles, unknown, false) }
-            switch children(of: element) {
+            guard !isExpired() else { return (obstacles, unknown, false) }
+            switch readChildren(element) {
             case .available(let children) where !children.isEmpty:
                 if queue.count - cursor + children.count > remainingNodes {
                     return (obstacles, unknown, false)
                 }
                 queue.append(contentsOf: children)
             case .available:
-                unknown.append(contentsOf: clip(rect, to: visibleRegions))
+                guard !isExpired() else { return (obstacles, unknown, false) }
+                switch readFrame(element) {
+                case .empty:
+                    continue
+                case .visible(let rect):
+                    unknown.append(contentsOf: clip(rect, to: visibleRegions))
+                case .unavailable:
+                    return (obstacles, unknown, false)
+                }
             case .unsupported:
+                guard !isExpired(), case .visible(let rect) = readFrame(element) else {
+                    return (obstacles, unknown, false)
+                }
                 unknown.append(contentsOf: clip(rect, to: visibleRegions))
             case .failed:
                 return (obstacles, unknown, false)
@@ -273,16 +305,28 @@ actor SystemInspector {
         return (obstacles, unknown, true)
     }
 
-    private enum ChildrenResult {
-        case available([AXUIElement])
+    enum ChildrenResult<Element> {
+        case available([Element])
         case unsupported
         case failed
     }
 
-    private enum Visibility {
+    enum Visibility {
         case visible
         case hidden
         case failed
+    }
+
+    enum AccessibilityFrame {
+        case visible(PetRect)
+        case empty
+        case unavailable
+    }
+
+    nonisolated static func accessibilityFrame(_ rect: PetRect) -> AccessibilityFrame {
+        guard rect.x.isFinite, rect.y.isFinite, rect.width.isFinite, rect.height.isFinite,
+              rect.width >= 0, rect.height >= 0 else { return .unavailable }
+        return rect.width == 0 || rect.height == 0 ? .empty : .visible(rect)
     }
 
     private static func visibility(of element: AXUIElement) -> Visibility {
@@ -298,7 +342,7 @@ actor SystemInspector {
         }
     }
 
-    private static func children(of element: AXUIElement) -> ChildrenResult {
+    private static func children(of element: AXUIElement) -> ChildrenResult<AXUIElement> {
         var value: CFTypeRef?
         switch AXUIElementCopyAttributeValue(element, kAXChildrenAttribute as CFString, &value) {
         case .success:
@@ -321,25 +365,25 @@ actor SystemInspector {
         of element: AXUIElement,
         deadline: ContinuousClock.Instant,
         clock: ContinuousClock
-    ) -> PetRect? {
-        guard clock.now < deadline,
-              let position = attribute(element, kAXPositionAttribute as CFString),
-              clock.now < deadline,
-              let size = attribute(element, kAXSizeAttribute as CFString),
-              clock.now < deadline,
+    ) -> AccessibilityFrame {
+        guard clock.now < deadline else { return .unavailable }
+        let position = attribute(element, kAXPositionAttribute as CFString)
+        guard clock.now < deadline else { return .unavailable }
+        let size = attribute(element, kAXSizeAttribute as CFString)
+        guard clock.now < deadline, let position, let size,
               CFGetTypeID(position) == AXValueGetTypeID(),
               CFGetTypeID(size) == AXValueGetTypeID()
-        else { return nil }
+        else { return .unavailable }
         var point = CGPoint.zero
         var dimensions = CGSize.zero
         guard AXValueGetValue(position as! AXValue, .cgPoint, &point),
               AXValueGetValue(size as! AXValue, .cgSize, &dimensions)
-        else { return nil }
+        else { return .unavailable }
         let rect = PetRect(
             x: Double(point.x), y: Double(point.y),
             width: Double(dimensions.width), height: Double(dimensions.height)
         )
-        return valid(rect) ? rect : nil
+        return accessibilityFrame(rect)
     }
 
     private static let obstacleRoles: Set<String> = [
@@ -484,7 +528,6 @@ final class SystemChangeObserver {
             let applicationNotifications = [
                 kAXFocusedUIElementChangedNotification,
                 kAXLayoutChangedNotification,
-                kAXValueChangedNotification,
                 kAXWindowCreatedNotification,
             ]
             var supported = false
@@ -497,7 +540,7 @@ final class SystemChangeObserver {
             for window in windows {
                 guard clock.now < deadline else { break }
                 for notification in [kAXMovedNotification, kAXResizedNotification,
-                                     kAXLayoutChangedNotification, kAXValueChangedNotification,
+                                     kAXLayoutChangedNotification,
                                      kAXUIElementDestroyedNotification] {
                     guard clock.now < deadline else { break }
                     supported = AXObserverAddNotification(
