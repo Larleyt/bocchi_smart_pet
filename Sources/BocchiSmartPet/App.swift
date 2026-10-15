@@ -17,10 +17,11 @@ private struct WindowIdentity: Hashable {
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var session: PlacementSession?
+    private let startPaused: Bool
     private let inspector = SystemInspector()
     private let analyzer = ScreenAnalyzer()
     private let changes = SystemChangeObserver()
-    private var setup: PermissionSetup?
+    private(set) var setup: PermissionSetup?
     private var statusItem: NSStatusItem?
     private let statusLine = NSMenuItem(title: "Боччи запускается", action: nil, keyEquivalent: "")
     private var pauseItem: NSMenuItem?
@@ -36,9 +37,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var lastInput = 0.0
     private var lastAttempt = -10.0
     private var lastSuccess = -10.0
-    private var permissions = PermissionState.current
+    private var permissions: PermissionState
     private var visualEnabled = UserDefaults.standard.bool(forKey: "visualFallbackEnabled")
     private var refreshTask: Task<Void, Never>?
+
+    init(startPaused: Bool = false, initialPermissions: PermissionState = .current) {
+        self.startPaused = startPaused
+        self.permissions = initialPermissions
+        super.init()
+    }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         do { session = PlacementSession(overlay: try PetOverlay()) }
@@ -50,6 +57,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             NSApplication.shared.terminate(nil)
             return
         }
+        if startPaused { session?.setEnabled(false) }
         setup = PermissionSetup { [weak self] enabled in
             guard let self else { return }
             visualEnabled = enabled
@@ -93,8 +101,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         heartbeat = Timer.scheduledTimer(withTimeInterval: 0.2, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated { self?.tick() }
         }
-        if !permissions.accessibility { showSetup() }
+        showSetup()
         tick()
+    }
+
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows: Bool) -> Bool {
+        showSetup()
+        return false
     }
 
     private func addItem(_ title: String, action: Selector, to menu: NSMenu) -> NSMenuItem {
@@ -237,8 +250,18 @@ enum BocchiSmartPet {
             Task { @MainActor in Darwin.exit(await RuntimeSelfTest.run()) }
             app.run()
         } else {
-            let delegate = AppDelegate()
+            let launchCheck = CommandLine.arguments.contains("--launch-check")
+            let grantedAccessibilityFixture = PermissionState(accessibility: true, screenCapture: false)
+            let delegate = AppDelegate(startPaused: launchCheck,
+                initialPermissions: launchCheck ? grantedAccessibilityFixture : .current)
             app.delegate = delegate
+            if launchCheck {
+                Task { @MainActor in
+                    let code = await LaunchCheck.run(delegate)
+                    delegate.applicationWillTerminate(Notification(name: NSApplication.willTerminateNotification))
+                    Darwin.exit(code)
+                }
+            }
             withExtendedLifetime(delegate) { app.run() }
         }
     }

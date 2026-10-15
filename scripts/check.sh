@@ -35,3 +35,14 @@ DYLD_FRAMEWORK_PATH="$xctest_frameworks" DYLD_LIBRARY_PATH="$xctest_usr_lib" \
     "$xctest_runner" "$test_bundle"
 xcrun swift run BocchiSmartPet --self-test
 "$project_root/scripts/build-app.sh"
+launch_log="$project_root/artifacts/launch-check.log"
+launch_errors="$project_root/artifacts/launch-check-stderr.log"
+: > "$launch_log"
+: > "$launch_errors"
+/usr/bin/open -n -W --stdout "$launch_log" --stderr "$launch_errors" \
+    "$project_root/dist/Bocchi Smart Pet.app" --args --launch-check
+cat "$launch_log"
+if ! grep -qx 'LAUNCH-CHECK RESULT: PASS (0 failed)' "$launch_log"; then
+    cat "$launch_errors" >&2
+    exit 1
+fi
