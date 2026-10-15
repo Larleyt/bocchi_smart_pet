@@ -67,6 +67,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             return
         }
         if startPaused { session?.setEnabled(false) }
+        session?.overlay.onInteraction = { [weak self] event in self?.interact(event) }
         setup = PermissionSetup { [weak self] enabled in
             guard let self else { return }
             visualEnabled = enabled
@@ -94,7 +95,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             Task { @MainActor in self?.input(type: type) }
         }
         localMonitor = NSEvent.addLocalMonitorForEvents(matching: events) { [weak self] event in
-            self?.input(type: event.type)
+            if !(event.window is PetPanel) { self?.input(type: event.type) }
             return event
         }
         for name in [NSWorkspace.didActivateApplicationNotification,
@@ -103,7 +104,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             observers.append(NSWorkspace.shared.notificationCenter.addObserver(
                 forName: name, object: nil, queue: .main
             ) { [weak self] _ in
-                MainActor.assumeIsolated { self?.invalidate(preservingVerification: false) }
+                MainActor.assumeIsolated {
+                    self?.invalidate(preservingVerification: name == NSWorkspace.didActivateApplicationNotification)
+                }
             })
         }
         observers.append(NotificationCenter.default.addObserver(
@@ -160,10 +163,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             NSLog("Bocchi input: type=%@", String(describing: type))
             lastMovementLog = now
         }
-        if session?.input(moved: type == .mouseMoved, contentMoved: contentMoved, cursor: ScreenCoordinates.cursor) == true {
+        if session?.input(moved: type == .mouseMoved, contentMoved: contentMoved) == true {
             pending = true
             lastInput = ProcessInfo.processInfo.systemUptime
         }
+    }
+
+    private func interact(_ event: PetInteractionEvent) {
+        guard let session, session.enabled else { return }
+        switch event {
+        case .clicked:
+            break
+        case .dragBegan:
+            session.beginDragging()
+            pending = true
+        case .dragChanged:
+            lastInput = ProcessInfo.processInfo.systemUptime
+        case .dragEnded(let placement):
+            session.drop(at: placement)
+            pending = true
+        case .hoverEscapeRequested:
+            session.escape()
+            pending = true
+        case .movementEnded:
+            invalidate()
+        }
+        if tracePlacement { NSLog("Bocchi interaction: %@", String(describing: event)) }
     }
 
     private func tick() {
@@ -178,6 +203,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             session.overlay.panel.orderOut(nil)
             return
         }
+        guard !session.overlay.isDragging, !session.overlay.isMoving else { return }
         let nextContext: DisplayContext
         do {
             guard let value = try currentContext() else {
