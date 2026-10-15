@@ -20,7 +20,7 @@ cp "$project_root/Assets/bocchi-spritesheet.png" "$staging_app/Contents/Resource
 install -m 755 "$binary_dir/BocchiSmartPet" "$staging_app/Contents/MacOS/BocchiSmartPet"
 
 plutil -lint "$staging_app/Contents/Info.plist"
-xcrun codesign --force --sign - --timestamp=none "$staging_app"
+/usr/bin/python3 "$project_root/scripts/sign-app.py" "$staging_app"
 xcrun codesign --verify --strict "$staging_app"
 
 rm -rf "$output_app"

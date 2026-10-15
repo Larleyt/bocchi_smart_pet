@@ -35,6 +35,7 @@ DYLD_FRAMEWORK_PATH="$xctest_frameworks" DYLD_LIBRARY_PATH="$xctest_usr_lib" \
     "$xctest_runner" "$test_bundle"
 xcrun swift run BocchiSmartPet --self-test
 "$project_root/scripts/build-app.sh"
+/usr/bin/python3 "$project_root/scripts/check-signing.py"
 launch_log="$project_root/artifacts/launch-check.log"
 launch_errors="$project_root/artifacts/launch-check-stderr.log"
 : > "$launch_log"

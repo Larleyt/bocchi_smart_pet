@@ -25,6 +25,7 @@ final class PermissionSetup: NSObject {
     )
     private(set) var window: NSWindow?
     private var accessibilityRequestPendingUntil = 0.0
+    private var observedAccessibilityWhileVisible: Bool?
 
     init(onVisualFallbackChanged: @escaping (Bool) -> Void) {
         self.onVisualFallbackChanged = onVisualFallbackChanged
@@ -33,19 +34,25 @@ final class PermissionSetup: NSObject {
 
     var isVisible: Bool { window?.isVisible == true }
 
-    func show() {
+    func show(state: PermissionState = .current) {
         if window == nil { window = makeWindow() }
-        update(state: .current, visualFallbackEnabled: visualFallback.state == .on)
+        observedAccessibilityWhileVisible = nil
+        update(state: state, visualFallbackEnabled: visualFallback.state == .on)
         window?.center()
         window?.makeKeyAndOrderFront(nil)
         NSApplication.shared.activate(ignoringOtherApps: true)
+        observedAccessibilityWhileVisible = state.accessibility
     }
 
     func dismiss() {
         window?.orderOut(nil)
+        observedAccessibilityWhileVisible = nil
     }
 
     func update(state: PermissionState, visualFallbackEnabled: Bool) {
+        let accessibilityWasGranted = isVisible
+            && observedAccessibilityWhileVisible == false
+            && state.accessibility
         if state.accessibility { accessibilityRequestPendingUntil = 0 }
         let accessibilityRequestPending = ProcessInfo.processInfo.systemUptime < accessibilityRequestPendingUntil
         accessibilityStatus.stringValue = state.accessibility
@@ -55,6 +62,8 @@ final class PermissionSetup: NSObject {
         screenCaptureStatus.stringValue = state.screenCapture ? "Разрешено" : "Не разрешено"
         screenCaptureStatus.textColor = state.screenCapture ? .systemGreen : .secondaryLabelColor
         visualFallback.state = visualFallbackEnabled ? .on : .off
+        if isVisible { observedAccessibilityWhileVisible = state.accessibility }
+        if accessibilityWasGranted { dismiss() }
     }
 
     private func makeWindow() -> NSWindow {
@@ -116,7 +125,7 @@ final class PermissionSetup: NSObject {
         pathRow.spacing = 8
         appPath.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         let pathHelp = wrappingLabel(
-            "В настройках разрешите “Bocchi Smart Pet”. Если её нет в списке, добавьте через “+” по пути выше. macOS может попросить перезапуск."
+            "Если галочка уже включена, а статус — “Не разрешено”, удалите старую запись кнопкой “−”, добавьте эту .app через “+” и перезапустите Боччи."
         )
         pathHelp.textColor = .secondaryLabelColor
 

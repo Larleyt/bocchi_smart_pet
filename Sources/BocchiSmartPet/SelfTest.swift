@@ -40,8 +40,19 @@ enum RuntimeSelfTest {
             try check(ScreenCoordinates.appKit(converted, primaryHeight: 1000) == original,
                       "display coordinate round trip")
             let setup = PermissionSetup { _ in }
-            setup.show()
-            setup.update(state: PermissionState(accessibility: true, screenCapture: false), visualFallbackEnabled: false)
+            let deniedPermissions = PermissionState(accessibility: false, screenCapture: false)
+            let grantedAccessibilityOnly = PermissionState(accessibility: true, screenCapture: false)
+            setup.show(state: deniedPermissions)
+            try check(setup.window?.isVisible == true, "denied permission setup is visible")
+            setup.update(state: deniedPermissions, visualFallbackEnabled: false)
+            try check(setup.window?.isVisible == true, "unchanged denied permission keeps setup visible")
+            setup.update(state: grantedAccessibilityOnly, visualFallbackEnabled: false)
+            try check(setup.window?.isVisible == false,
+                      "observed Accessibility grant dismisses setup without Screen Recording")
+            setup.show(state: grantedAccessibilityOnly)
+            setup.update(state: grantedAccessibilityOnly, visualFallbackEnabled: false)
+            try check(setup.window?.isVisible == true,
+                      "manual setup opened with existing Accessibility grant stays visible")
             guard let setupWindow = setup.window, let setupContent = setupWindow.contentView,
                   let setupStack = setupContent.subviews.first as? NSStackView else {
                 throw SelfTestFailure.failed("permission setup view missing")

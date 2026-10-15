@@ -2,4 +2,5 @@
 .swiftpm/
 dist/
 artifacts/
+.local-signing/
 .DS_Store
