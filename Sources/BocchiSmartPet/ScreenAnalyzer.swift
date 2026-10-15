@@ -267,43 +267,25 @@ actor ScreenAnalyzer {
             }
         }
 
-        var visited = [Bool](repeating: false, count: detailed.count)
         var rectangles: [PetRect] = []
-        for start in detailed.indices where detailed[start] && !visited[start] {
-            visited[start] = true
-            var queue = [start]
-            var cursor = 0
-            var minColumn = start % columns
-            var maxColumn = minColumn
-            var minRow = start / columns
-            var maxRow = minRow
-
-            while cursor < queue.count {
-                let index = queue[cursor]
-                cursor += 1
-                let column = index % columns
-                let row = index / columns
-                minColumn = min(minColumn, column)
-                maxColumn = max(maxColumn, column)
-                minRow = min(minRow, row)
-                maxRow = max(maxRow, row)
-
-                for (nextColumn, nextRow) in [
-                    (column - 1, row), (column + 1, row), (column, row - 1), (column, row + 1)
-                ] where nextColumn >= 0 && nextColumn < columns && nextRow >= 0 && nextRow < rows {
-                    let next = nextRow * columns + nextColumn
-                    if detailed[next] && !visited[next] {
-                        visited[next] = true
-                        queue.append(next)
-                    }
+        for row in 0..<rows {
+            var column = 0
+            while column < columns {
+                guard detailed[row * columns + column] else {
+                    column += 1
+                    continue
                 }
-            }
+                let firstColumn = column
+                while column < columns, detailed[row * columns + column] {
+                    column += 1
+                }
 
-            let x = screenBounds.x + Double(minColumn) * screenBounds.width / Double(columns)
-            let y = screenBounds.y + Double(minRow) * screenBounds.height / Double(rows)
-            let maxX = screenBounds.x + Double(maxColumn + 1) * screenBounds.width / Double(columns)
-            let maxY = screenBounds.y + Double(maxRow + 1) * screenBounds.height / Double(rows)
-            rectangles.append(PetRect(x: x, y: y, width: maxX - x, height: maxY - y))
+                let x = screenBounds.x + Double(firstColumn) * screenBounds.width / Double(columns)
+                let y = screenBounds.y + Double(row) * screenBounds.height / Double(rows)
+                let maxX = screenBounds.x + Double(column) * screenBounds.width / Double(columns)
+                let maxY = screenBounds.y + Double(row + 1) * screenBounds.height / Double(rows)
+                rectangles.append(PetRect(x: x, y: y, width: maxX - x, height: maxY - y))
+            }
         }
         return rectangles
     }

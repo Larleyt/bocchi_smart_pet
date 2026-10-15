@@ -23,7 +23,12 @@ final class PlacementSession {
     private var activityAreas: [PetRect] = []
     private var relocationPending = false
     private var verificationRequired = false
-    private var searchExhausted = false
+    private enum SearchState {
+        case ready
+        case waitingForFullCapture(until: Double)
+        case exhausted
+    }
+    private var searchState = SearchState.ready
     private var lastFullCapture = -Double.infinity
     private var manualPlacement: PetRect?
     private var searchOrigin: PetRect?
@@ -54,7 +59,7 @@ final class PlacementSession {
             verificationRequired = false
             manualPlacement = nil
         }
-        searchExhausted = false
+        searchState = .ready
     }
 
     func setEnabled(_ enabled: Bool) {
@@ -144,6 +149,11 @@ final class PlacementSession {
             let sample = try await capture(region)
             guard relevant(), now() - started <= 2.5 else { return nil }
             guard sample.bounds == region else { throw SessionError.invalidCaptureRegion }
+            if tracePlacement {
+                let largest = sample.obstacles.max { $0.width * $0.height < $1.width * $1.height }
+                NSLog("Bocchi visual geometry: region=%@ obstacles=%d largest=%@", String(describing: region),
+                      sample.obstacles.count, String(describing: largest))
+            }
             return sample
         }
         func remember(_ rect: PetRect, region: PetRect, sample: PixelSample) {
@@ -169,10 +179,10 @@ final class PlacementSession {
                 verificationRequired = verified != nil
             }
             if screenChanged || visualModeChanged {
-                searchExhausted = false
+                searchState = .ready
                 overlay.panel.orderOut(nil)
             } else if boundsChanged || windowsChanged || contentsChanged {
-                searchExhausted = false
+                searchState = .ready
             }
             if screenChanged || (windowsChanged && !relocationPending) {
                 if tracePlacement, !activityAreas.isEmpty {
@@ -257,13 +267,18 @@ final class PlacementSession {
                 activityAreas = Array(activityAreas.suffix(8))
                 verified = nil
                 verificationRequired = false
-                searchExhausted = false
+                searchState = .ready
             } else {
                 verified = nil
                 verificationRequired = false
             }
 
-            guard !searchExhausted else {
+            switch searchState {
+            case .ready:
+                break
+            case .waitingForFullCapture(let until) where now() >= until:
+                searchState = .ready
+            default:
                 overlay.publish(placement: nil, generation: generation)
                 return .noSpace
             }
@@ -300,29 +315,30 @@ final class PlacementSession {
                 return show(known, visual: false)
             }
 
-            // A failed search waits for a scene/input change; the timer never repeats full-screen capture.
-            searchExhausted = true
             guard now() - lastFullCapture >= 10 else {
+                searchState = .waitingForFullCapture(until: lastFullCapture + 10)
                 overlay.publish(placement: nil, generation: generation)
                 return .noSpace
             }
             lastFullCapture = now()
             guard let map = try await take(screenBounds) else { return discard() }
-            guard let candidate = PlacementEngine.choose(in: bounds,
-                avoiding: searchingObstacles + map.obstacles, size: PetOverlay.size,
-                previous: nil, nearestTo: origin)
-            else {
-                overlay.publish(placement: nil, generation: generation)
-                return .noSpace
+            // A completed failed search waits for a scene/input change, never for the timer alone.
+            searchState = .exhausted
+            for _ in 0..<3 {
+                guard let candidate = PlacementEngine.choose(in: bounds,
+                    avoiding: searchingObstacles + map.obstacles + rejected, size: PetOverlay.size,
+                    previous: nil, nearestTo: origin) else { break }
+                let region = Self.region(around: candidate, in: screenBounds)
+                guard let sample = try await take(region) else { return discard() }
+                if !Self.collides(candidate, with: sample.obstacles) {
+                    remember(candidate, region: region, sample: sample)
+                    searchState = .ready
+                    return show(candidate, visual: true)
+                }
+                rejected.append(contentsOf: sample.obstacles)
             }
-            let region = Self.region(around: candidate, in: screenBounds)
-            guard let sample = try await take(region) else { return discard() }
-            guard !Self.collides(candidate, with: sample.obstacles) else {
-                overlay.publish(placement: nil, generation: generation)
-                return .noSpace
-            }
-            remember(candidate, region: region, sample: sample)
-            return show(candidate, visual: true)
+            overlay.publish(placement: nil, generation: generation)
+            return .noSpace
         } catch {
             guard relevant() else { return discard() }
             invalidate(preservingVerification: false)

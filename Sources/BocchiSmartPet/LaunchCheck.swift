@@ -30,7 +30,15 @@ enum LaunchCheck {
             return 1
         }
 
-        setup.dismiss()
+        func buttons(in view: NSView) -> [NSButton] {
+            view.subviews.flatMap { ($0 as? NSButton).map { [$0] } ?? buttons(in: $0) }
+        }
+        let startButton = expectedWindow.contentView.flatMap {
+            buttons(in: $0).first { $0.title == "Закрыть и начать" }
+        }
+        startButton?.performClick(nil)
+        check(startButton != nil && !setup.isVisible,
+              "Close and start button dismisses setup through its native action")
         check(await reopen(setup: setup, expectedWindow: expectedWindow),
               "LaunchServices reopen restores the same active key setup window")
 

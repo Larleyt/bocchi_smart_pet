@@ -32,6 +32,7 @@ enum RuntimeSelfTest {
             overlay = panel
             defer { panel.stop() }
             try await InteractionCheck.run(check)
+            try await VisualGeometryCheck.run(check)
             try check(panel.panel.ignoresMouseEvents && !panel.panel.canBecomeKey && !panel.panel.canBecomeMain,
                       "overlay does not intercept clicks or focus")
             let original = NSRect(x: -1200, y: 1100, width: 900, height: 640)
@@ -651,11 +652,48 @@ enum RuntimeSelfTest {
             })
             capturedRegions = []
             clock += 1
+            session.drop(at: PetRect(x: 24, y: 242, width: 84, height: 156))
             let limited = try await runSession(unknownScene(17), visual: true, pixels: {
                 PixelSample(bounds: $0, obstacles: [$0], fingerprint: white)
             })
             try check(limited == .noSpace && capturedRegions.count == 3 && !capturedRegions.contains(bounds),
                       "new scenes respect one-full-map-per-ten-second limit and remain hidden")
+            let coolingCount = capturedRegions.count
+            clock += 1
+            let waiting = try await runSession(unknownScene(17), visual: true)
+            try check(waiting == .noSpace && capturedRegions.count == coolingCount,
+                      "deferred full search waits without repeating local captures before its deadline")
+            clock += 10
+            capturedRegions = []
+            let leftOccupied = PetRect(x: 0, y: 0, width: 700, height: 640)
+            let recovered = try await runSession(unknownScene(17), visual: true, pixels: { region in
+                let occupiedWidth = min(region.maxX, leftOccupied.maxX) - region.x
+                let obstacles = occupiedWidth > 0
+                    ? [PetRect(x: region.x, y: region.y, width: occupiedWidth, height: region.height)] : []
+                return PixelSample(bounds: region, obstacles: obstacles, fingerprint: white)
+            })
+            try check(recovered == .shown(visual: true) && panel.panel.isVisible
+                      && panel.lastPlacement.map { $0.x >= leftOccupied.maxX + 12 } == true
+                      && capturedRegions.filter { $0 == bounds }.count == 1,
+                      "deferred full search resumes without new input and shows the verified free side")
+
+            clock += 20
+            capturedRegions = []
+            session.drop(at: PetRect(x: 24, y: 242, width: 84, height: 156))
+            let missedDetail = PetRect(x: 0, y: 0, width: 400, height: 640)
+            let secondMapCandidate = try await runSession(unknownScene(19), visual: true,
+                usable: PetRect(x: 0, y: 242, width: 900, height: 156), pixels: { region in
+                // External coarse-map fixture misses detail that exact local crops still detect.
+                let occupiedWidth = min(region.maxX, missedDetail.maxX) - region.x
+                let obstacles = region != bounds && occupiedWidth > 0
+                    ? [PetRect(x: region.x, y: region.y, width: occupiedWidth, height: region.height)] : []
+                return PixelSample(bounds: region, obstacles: obstacles, fingerprint: white)
+            })
+            try check(secondMapCandidate == .shown(visual: true) && panel.panel.isVisible
+                      && panel.lastPlacement.map { $0.x >= missedDetail.maxX + 12 } == true
+                      && capturedRegions.count == 6
+                      && capturedRegions.filter { $0 == bounds }.count == 1,
+                      "full-map local rejection tries the next safe candidate using the same map")
 
             let staleBaseline = try await runSession(unknownScene(18), visual: true, pixels: {
                 PixelSample(bounds: $0, obstacles: [], fingerprint: white)
