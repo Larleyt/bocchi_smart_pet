@@ -222,7 +222,8 @@ actor SystemInspector {
             readRole: { attribute($0, kAXRoleAttribute as CFString) as? String },
             readVisibility: { visibility(of: $0) },
             readFrame: { frame(of: $0, deadline: deadline, clock: clock) },
-            readChildren: { children(of: $0) }
+            readChildren: { children(of: $0) },
+            readActions: { actions(of: $0) }
         )
     }
 
@@ -234,7 +235,8 @@ actor SystemInspector {
         readRole: (Element) -> String?,
         readVisibility: (Element) -> Visibility,
         readFrame: (Element) -> AccessibilityFrame,
-        readChildren: (Element) -> ChildrenResult<Element>
+        readChildren: (Element) -> ChildrenResult<Element>,
+        readActions: (Element) -> [String]?
     ) -> (obstacles: [PetRect], unknown: [PetRect], complete: Bool) {
         var queue = [root]
         var cursor = 0
@@ -259,7 +261,20 @@ actor SystemInspector {
             case .visible:
                 break
             }
-            switch kind(for: role) {
+            let elementKind = kind(for: role)
+            if elementKind != .obstacle {
+                guard !isExpired(), let actions = readActions(element), !isExpired() else {
+                    return (obstacles, unknown, false)
+                }
+                if hasActivatingAction(actions) {
+                    guard case .visible(let rect) = readFrame(element), !isExpired() else {
+                        return (obstacles, unknown, false)
+                    }
+                    obstacles.append(contentsOf: clip(rect, to: visibleRegions))
+                    continue
+                }
+            }
+            switch elementKind {
             case .obstacle:
                 guard !isExpired(), case .visible(let rect) = readFrame(element) else {
                     return (obstacles, unknown, false)
@@ -355,6 +370,14 @@ actor SystemInspector {
         }
     }
 
+    private static func actions(of element: AXUIElement) -> [String]? {
+        var value: CFArray?
+        guard AXUIElementCopyActionNames(element, &value) == .success,
+              let value, let actions = value as? [String]
+        else { return nil }
+        return actions
+    }
+
     private static func attribute(_ element: AXUIElement, _ name: CFString) -> CFTypeRef? {
         var value: CFTypeRef?
         guard AXUIElementCopyAttributeValue(element, name, &value) == .success else { return nil }
@@ -388,7 +411,7 @@ actor SystemInspector {
 
     private static let obstacleRoles: Set<String> = [
         kAXButtonRole as String, kAXCheckBoxRole as String, kAXComboBoxRole as String,
-        kAXDisclosureTriangleRole as String, kAXGrowAreaRole as String, kAXImageRole as String,
+        kAXDisclosureTriangleRole as String, kAXGrowAreaRole as String,
         kAXIncrementorRole as String, "AXLink", kAXMenuBarItemRole as String,
         kAXMenuButtonRole as String, kAXMenuItemRole as String, kAXPopUpButtonRole as String,
         kAXRadioButtonRole as String, "AXSearchField", kAXScrollBarRole as String,
@@ -420,6 +443,16 @@ actor SystemInspector {
         case unknown
     }
 
+    private static let activatingActions: Set<String> = [
+        kAXPressAction as String, kAXPickAction as String,
+        kAXConfirmAction as String, kAXCancelAction as String,
+        kAXIncrementAction as String, kAXDecrementAction as String,
+    ]
+
+    nonisolated static func hasActivatingAction(_ actions: [String]) -> Bool {
+        actions.contains { activatingActions.contains($0) }
+    }
+
     private static func kind(for role: String) -> ElementKind {
         if obstacleRoles.contains(role) { return .obstacle }
         if containerRoles.contains(role) { return .container }
@@ -429,6 +462,7 @@ actor SystemInspector {
     private static let roleClassificationCheck: Void = {
         assert(kind(for: kAXGroupRole as String) == .container)
         assert(kind(for: kAXUnknownRole as String) == .unknown)
+        assert(kind(for: kAXImageRole as String) == .unknown)
         assert(kind(for: kAXButtonRole as String) == .obstacle)
     }()
 

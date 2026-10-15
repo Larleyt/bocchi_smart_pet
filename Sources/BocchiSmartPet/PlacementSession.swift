@@ -44,10 +44,16 @@ final class PlacementSession {
     func setEnabled(_ enabled: Bool) { self.enabled = enabled; invalidate() }
 
     @discardableResult
-    func input(moved: Bool, cursor: PetPoint) -> Bool {
-        if moved {
-            guard overlay.panel.isVisible, let placement = overlay.lastPlacement,
-                  Self.collides(placement, with: [Self.cursorObstacle(cursor)]) else { return false }
+    func input(moved: Bool, contentMoved: Bool, cursor: PetPoint) -> Bool {
+        let placement = overlay.lastPlacement
+        let cursorCollision = moved && overlay.panel.isVisible && placement.map {
+            Self.collides($0, with: [Self.cursorObstacle(cursor)])
+        } == true
+        if moved && !contentMoved && !cursorCollision { return false }
+        if (contentMoved || cursorCollision), let placement {
+            activityAreas.removeAll { $0 == placement }
+            activityAreas.append(placement)
+            activityAreas = Array(activityAreas.suffix(8))
         }
         invalidate()
         return true

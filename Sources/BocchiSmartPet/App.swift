@@ -85,13 +85,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         statusItem = item
 
         let events: NSEvent.EventTypeMask = [.leftMouseDown, .rightMouseDown,
-            .otherMouseDown, .scrollWheel, .leftMouseDragged, .rightMouseDragged, .mouseMoved]
+            .otherMouseDown, .scrollWheel, .leftMouseDragged, .rightMouseDragged, .otherMouseDragged, .mouseMoved]
         globalMonitor = NSEvent.addGlobalMonitorForEvents(matching: events) { [weak self] event in
             let moved = event.type == .mouseMoved
-            Task { @MainActor in self?.input(moved: moved) }
+            let contentMoved = Self.isContentMovement(event.type)
+            Task { @MainActor in self?.input(moved: moved, contentMoved: contentMoved) }
         }
         localMonitor = NSEvent.addLocalMonitorForEvents(matching: events) { [weak self] event in
-            self?.input(moved: event.type == .mouseMoved)
+            self?.input(moved: event.type == .mouseMoved, contentMoved: Self.isContentMovement(event.type))
             return event
         }
         for name in [NSWorkspace.didActivateApplicationNotification,
@@ -139,8 +140,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         pending = true
     }
 
-    private func input(moved: Bool) {
-        if session?.input(moved: moved, cursor: ScreenCoordinates.cursor) == true {
+    nonisolated static func isContentMovement(_ type: NSEvent.EventType) -> Bool {
+        switch type {
+        case .scrollWheel, .leftMouseDragged, .rightMouseDragged, .otherMouseDragged: true
+        default: false
+        }
+    }
+
+    private func input(moved: Bool, contentMoved: Bool) {
+        if session?.input(moved: moved, contentMoved: contentMoved, cursor: ScreenCoordinates.cursor) == true {
             pending = true
             lastInput = ProcessInfo.processInfo.systemUptime
         }
