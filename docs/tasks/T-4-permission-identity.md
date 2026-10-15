@@ -22,6 +22,7 @@ TCC не изменяется программно, разрешения не н
 - `./scripts/check.sh` завершился exit 0: 14 XCTest, 52 runtime, 8 signing, 5 launch, 0 failures; release/plist/codesign прошли. Лог `artifacts/t4-final-check.log`. Финальная `.app` подписана `Bocchi Smart Pet Local Signing`, DR содержит pinned leaf certificate и identifier.
 - Возврат production-вызова в `build-app.sh` на старую ad-hoc подпись даёт `SIGNING-CHECK RESULT: FAIL: packaged app uses the persistent project requirement`. Build script восстановлен побайтно (совпадающие SHA); затем повторён полный green. Артефакты `artifacts/t4-packaged-red.log`, `artifacts/t4-packaged-mutation.json`.
 - Повторное независимое ревью подтвердило устранение packaged-app test gap, полноту red/green, стабильный DR и privacy; остаточных findings кода не заявлено.
+- После ручного удаления старой записи и добавления текущей `.app` журнал `artifacts/t4-after-user-grant.log` показывает новый Accessibility `Allowed` с pinned certificate DR; `artifacts/t4-new-process-permission.log` подтверждает совпадение этого DR (`status: 0`) и `ReqResult(Auth Right: Allowed (System Set))` для нового процесса. Приложение запущено из исходного `dist/`, файлы в Applications не перемещались. Чужие AX-деревья и экран для этой проверки не читались.
 
 ## Найденные дефекты
 
@@ -32,7 +33,7 @@ TCC не изменяется программно, разрешения не н
 
 ## Blocked / deferred и откат
 
-- Пользователь вручную заменяет старую запись Accessibility текущей сборкой, затем перезапускает Боччи. Пока не подтверждены настоящий новый grant и сохранение разрешения через следующую сборку именно в TCC; доказаны криптографическая идентичность и её проверка. Live-сценарии размещения остаются в [T-2](T-2-minimal-capture.md#blocked--deferred).
+- Настоящий новый Accessibility grant подтверждён после ручной замены записи. Сохранение этого grant через следующую сборку именно в TCC ещё не проверено; криптографическая стабильность проверена. Live-сценарии размещения остаются в [T-2](T-2-minimal-capture.md#blocked--deferred). При запуске с уже выданным доступом setup открыт для управления; размещение начинается после «Закрыть и начать».
 - Запрос хоста на screen/audio доступ можно отклонить: эта задача не требует screen-доступа хоста. В диагностике T-4 screen/audio capture не вызывался; инициатор системного запроса не установлен. Собственный capture Боччи использует `capturesAudio=false`; её пиксельный режим остаётся отдельным opt-in.
 - Остановка — меню ♪ → «Завершить Боччи». Откат кода — revert отдельного коммита T-4 и пересборка; старый ad-hoc дефект вернётся. Не удалять `.local-signing/` при откате: это материал восстановления identity. Автозапуск/системное доверие/TCC программно не менялись.
 
