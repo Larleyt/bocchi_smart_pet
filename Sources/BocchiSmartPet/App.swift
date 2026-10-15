@@ -251,6 +251,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                     try await self.analyzer.capture(displayID: nextContext.id, screenBounds: nextContext.bounds,
                         region: region, ownBundleID: Bundle.main.bundleIdentifier ?? "local.bocchi.smartpet")
                 },
+                capturePerch: { region, edgeY in
+                    try await self.analyzer.capture(displayID: nextContext.id, screenBounds: nextContext.bounds,
+                        region: region, ownBundleID: Bundle.main.bundleIdentifier ?? "local.bocchi.smartpet",
+                        ignoringSupportEdgeY: edgeY)
+                },
                 current: {
                     PermissionState.current == state && self.visualEnabled == visualPreference
                         && (try? self.currentContext()) == nextContext

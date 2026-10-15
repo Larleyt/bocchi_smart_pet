@@ -32,6 +32,15 @@ final class PlacementSession {
     private var lastFullCapture = -Double.infinity
     private var manualPlacement: PetRect?
     private var searchOrigin: PetRect?
+    private struct Attachment {
+        let supportID: SupportWindowID
+        let offsetX: Double
+    }
+    private var attachment: Attachment?
+    private var perchSearchFinished = false
+    private var perchingSuppressed = false
+    private static let perchSize = PetSize(width: 128, height: 156)
+    private static let seatOffset = 112.0
 
     private struct Verification {
         let placement: PetRect
@@ -58,6 +67,9 @@ final class PlacementSession {
             verified = nil
             verificationRequired = false
             manualPlacement = nil
+            attachment = nil
+            perchSearchFinished = false
+            perchingSuppressed = false
         }
         searchState = .ready
     }
@@ -79,6 +91,8 @@ final class PlacementSession {
 
     func escape() {
         guard enabled, let placement = overlay.lastPlacement else { return }
+        detachPerch()
+        perchingSuppressed = true
         activityAreas.removeAll { $0 == placement }
         activityAreas.append(placement)
         activityAreas = Array(activityAreas.suffix(8))
@@ -87,16 +101,34 @@ final class PlacementSession {
     }
 
     func beginDragging() {
+        detachPerch()
+        perchingSuppressed = true
         verified = nil
         invalidate()
     }
 
     func drop(at placement: PetRect) {
         activityAreas = []
-        manualPlacement = placement
-        searchOrigin = placement
+        detachPerch()
+        perchingSuppressed = true
+        manualPlacement = Self.standingOrigin(placement)
+        searchOrigin = manualPlacement
         verified = nil
         invalidate()
+    }
+
+    private func detachPerch() {
+        if attachment != nil {
+            verified = nil
+            verificationRequired = false
+        }
+        attachment = nil
+        overlay.leavePerch()
+    }
+
+    private static func standingOrigin(_ rect: PetRect) -> PetRect {
+        PetRect(x: rect.x + (rect.width - PetOverlay.size.width) / 2, y: rect.y,
+                width: PetOverlay.size.width, height: PetOverlay.size.height)
     }
 
     private static func padded(_ rect: PetRect) -> PetRect {
@@ -120,6 +152,7 @@ final class PlacementSession {
         visualAllowed: Bool,
         inspect: () async throws -> SystemSnapshot,
         capture: (PetRect) async throws -> PixelSample,
+        capturePerch: ((PetRect, Double) async throws -> PixelSample)? = nil,
         current: () -> Bool,
         cursor: () -> PetPoint,
         now: () -> Double = { ProcessInfo.processInfo.systemUptime }
@@ -144,9 +177,14 @@ final class PlacementSession {
             }
             return .shown(visual: visual)
         }
-        func take(_ region: PetRect) async throws -> PixelSample? {
+        func take(_ region: PetRect, supportEdgeY: Double? = nil) async throws -> PixelSample? {
             let started = now()
-            let sample = try await capture(region)
+            let sample: PixelSample
+            if let supportEdgeY, let capturePerch {
+                sample = try await capturePerch(region, supportEdgeY)
+            } else {
+                sample = try await capture(region)
+            }
             guard relevant(), now() - started <= 2.5 else { return nil }
             guard sample.bounds == region else { throw SessionError.invalidCaptureRegion }
             if tracePlacement {
@@ -169,14 +207,20 @@ final class PlacementSession {
             let screenChanged = previousScreenBounds != screenBounds
             let windowsChanged = previousSystem?.windows != system.windows
             let visualModeChanged = previousVisualAllowed != visualAllowed
+            let supportsChanged = previousSystem?.supports != system.supports
             let contentsChanged = previousSystem?.obstacles != system.obstacles
                 || previousSystem?.unknownAreas != system.unknownAreas
                 || previousSystem?.accessibilityAvailable != system.accessibilityAvailable
             if screenChanged || visualModeChanged {
                 verified = nil
                 verificationRequired = false
+                detachPerch()
             } else if boundsChanged || windowsChanged || contentsChanged {
                 verificationRequired = verified != nil
+            }
+            if supportsChanged || contentsChanged || boundsChanged {
+                perchSearchFinished = false
+                if supportsChanged && attachment == nil { perchingSuppressed = false }
             }
             if screenChanged || visualModeChanged {
                 searchState = .ready
@@ -197,9 +241,72 @@ final class PlacementSession {
             previousScreenBounds = screenBounds
             previousSystem = system
             previousVisualAllowed = visualAllowed
+
+            if !perchingSuppressed, attachment != nil || !perchSearchFinished {
+                var candidates = system.supports
+                var perchOrigin = overlay.lastPlacement
+                if let attachment,
+                   let support = candidates.first(where: { $0.id == attachment.supportID }) {
+                    candidates = [support]
+                    perchOrigin = PetRect(x: support.windowBounds.x + attachment.offsetX,
+                        y: support.windowBounds.y - Self.seatOffset,
+                        width: Self.perchSize.width, height: Self.perchSize.height)
+                } else if attachment != nil {
+                    detachPerch()
+                }
+                var blocked = system.obstacles + activityAreas
+                if !visualAllowed { blocked += system.unknownAreas }
+                if attachment == nil { blocked.append(Self.cursorObstacle(cursor())) }
+                for _ in 0..<3 {
+                    guard let candidate = SupportGeometry.choose(in: bounds,
+                        avoiding: blocked.map(Self.padded), size: Self.perchSize,
+                        seatOffset: Self.seatOffset, supports: candidates, nearestTo: perchOrigin),
+                          let support = candidates.first(where: { $0.id == candidate.supportID }) else { break }
+                    let rect = candidate.placement
+                    let requiresPixels = visualAllowed && Self.collides(rect, with: system.unknownAreas)
+                    if requiresPixels {
+                        let region = Self.region(around: rect, in: screenBounds)
+                        let reuse = verified.map { $0.placement == rect
+                            && !verificationRequired && now() - $0.checkedAt < 5 } ?? false
+                        if !reuse {
+                            guard let sample = try await take(region, supportEdgeY: support.windowBounds.y)
+                            else { return discard() }
+                            let active = verified.map { verification in
+                                verification.placement == rect
+                                    && (sample.fingerprint.changedFraction(comparedTo: verification.baseline) ?? 1) >= 0.10
+                            } ?? false
+                            if Self.collides(rect, with: sample.obstacles) || active {
+                                blocked += sample.obstacles
+                                blocked.append(rect)
+                                continue
+                            }
+                            remember(rect, region: region, sample: sample)
+                            verificationRequired = false
+                        }
+                    } else {
+                        verified = nil
+                        verificationRequired = false
+                    }
+                    let following = attachment?.supportID == candidate.supportID && overlay.isSitting
+                    attachment = Attachment(supportID: candidate.supportID,
+                        offsetX: rect.x - support.windowBounds.x)
+                    searchOrigin = rect
+                    if following {
+                        overlay.followPerch(at: rect, generation: generation)
+                    } else {
+                        overlay.perch(at: rect, generation: generation)
+                    }
+                    if tracePlacement { NSLog("Bocchi perch: window=%u following=%d position=%@",
+                        candidate.supportID.windowID, following, String(describing: rect)) }
+                    return .shown(visual: requiresPixels)
+                }
+                perchSearchFinished = true
+                detachPerch()
+            }
             let obstacles = system.obstacles + activityAreas
             let searchingObstacles = obstacles + [Self.cursorObstacle(cursor())]
-            let origin = manualPlacement ?? (screenChanged ? nil : searchOrigin ?? overlay.lastPlacement)
+            let origin = (manualPlacement ?? (screenChanged ? nil : searchOrigin ?? overlay.lastPlacement))
+                .map(Self.standingOrigin)
             let desired = manualPlacement ?? overlay.lastPlacement
             manualPlacement = nil
             if overlay.lastPlacement.map({ Self.collides($0, with: system.obstacles) }) == true {

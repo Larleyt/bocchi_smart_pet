@@ -22,21 +22,28 @@ enum ScreenCoordinates {
 
 enum AtlasError: Error, LocalizedError {
     case invalidAsset
-    var errorDescription: String? { "Не найден корректный спрайт Боччи (1536 × 2288)." }
+    var errorDescription: String? { "Не найдены корректные спрайты Боччи." }
 }
 
 @MainActor
 final class SpriteView: NSView {
+    static let climbDuration = 1.2
+    private static var perchCache: [URL: ([NSImage], [NSImage])] = [:]
     private let idleFrames: [NSImage]
     private let gazeFrames: [[NSImage]]
     private let runningRight: [NSImage]
     private let runningLeft: [NSImage]
     private let clickReaction: [NSImage]
+    private let climbingFrames: [NSImage]
+    private let sittingFrames: [NSImage]
     private var timer: Timer?
     private let started: Double
     private var displayedFrame: NSImage
+    private var displayedFrameIsPerch = false
     private var interaction = PetInteractionState()
     private var clickReactionStarted: Double?
+    private var climbingStarted: Double?
+    private(set) var isSitting = false
     private var dragOrigin: NSPoint?
     private var windowOrigin: NSPoint?
     private var dragged = false
@@ -46,6 +53,7 @@ final class SpriteView: NSView {
     override var isFlipped: Bool { true }
 
     init(asset: URL? = nil,
+         perchAsset: URL? = nil,
          pointer: @escaping () -> NSPoint = { NSEvent.mouseLocation },
          clock: @escaping () -> Double = { ProcessInfo.processInfo.systemUptime },
          startsTimer: Bool = true) throws {
@@ -76,6 +84,41 @@ final class SpriteView: NSView {
         let waiting = try row(6, count: 6)
         clickReaction = try row(7, count: 6) + waiting.suffix(2)
         gazeFrames = [try row(9, count: 8), try row(10, count: 8)]
+        let perchURL = perchAsset
+            ?? Bundle.main.url(forResource: "bocchi-perch-spritesheet", withExtension: "png")
+            ?? URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+                .appendingPathComponent("Assets/bocchi-perch-spritesheet.png")
+        let cacheKey = perchURL.standardizedFileURL
+        if let cached = Self.perchCache[cacheKey] {
+            (climbingFrames, sittingFrames) = cached
+        } else {
+            guard let perchSource = CGImageSourceCreateWithURL(perchURL as CFURL, nil),
+                  let perchAtlas = CGImageSourceCreateImageAtIndex(perchSource, 0, nil),
+                  perchAtlas.width == perchAtlas.height,
+                  (512...4096).contains(perchAtlas.width) else {
+                throw AtlasError.invalidAsset
+            }
+            func perchFrames(_ range: Range<Int>) throws -> [NSImage] {
+                try range.map { index in
+                    let column = index % 4
+                    let row = index / 4
+                    let side = Double(perchAtlas.width)
+                    let x0 = (Double(column) * side / 4).rounded()
+                    let x1 = (Double(column + 1) * side / 4).rounded()
+                    let y0 = (Double(row) * side / 4).rounded()
+                    let y1 = (Double(row + 1) * side / 4).rounded()
+                    guard let image = perchAtlas.cropping(to: CGRect(
+                        x: x0, y: y0, width: x1 - x0, height: y1 - y0
+                    )) else { throw AtlasError.invalidAsset }
+                    return try Self.cleanedPerchFrame(image)
+                }
+            }
+            let climbing = try perchFrames(0..<8)
+            let sitting = try perchFrames(8..<16)
+            climbingFrames = climbing
+            sittingFrames = sitting
+            Self.perchCache[cacheKey] = (climbing, sitting)
+        }
         displayedFrame = idleFrames[0]
         super.init(frame: .zero)
         if startsTimer {
@@ -87,7 +130,97 @@ final class SpriteView: NSView {
 
     required init?(coder: NSCoder) { nil }
 
+    private static func cleanedPerchFrame(_ image: CGImage) throws -> NSImage {
+        let width = image.width
+        let height = image.height
+        let bytesPerRow = width * 4
+        var pixels = [UInt8](repeating: 0, count: bytesPerRow * height)
+        let colorSpace = CGColorSpaceCreateDeviceRGB()
+        let bitmapInfo = CGBitmapInfo.byteOrder32Big.rawValue
+            | CGImageAlphaInfo.premultipliedLast.rawValue
+        let decoded = pixels.withUnsafeMutableBytes { bytes -> Bool in
+            guard let baseAddress = bytes.baseAddress,
+                  let context = CGContext(data: baseAddress, width: width, height: height,
+                    bitsPerComponent: 8, bytesPerRow: bytesPerRow, space: colorSpace,
+                    bitmapInfo: bitmapInfo) else { return false }
+            context.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
+            return true
+        }
+        guard decoded else { throw AtlasError.invalidAsset }
+
+        var visited = [Bool](repeating: false, count: width * height)
+        var largest: [Int] = []
+        for start in 0..<(width * height) where !visited[start] && pixels[start * 4 + 3] >= 16 {
+            visited[start] = true
+            var component: [Int] = []
+            var queue = [start]
+            var cursor = 0
+            while cursor < queue.count {
+                let index = queue[cursor]
+                cursor += 1
+                component.append(index)
+                let x = index % width
+                let y = index / width
+                for dy in -1...1 {
+                    for dx in -1...1 where dx != 0 || dy != 0 {
+                        let nx = x + dx
+                        let ny = y + dy
+                        guard nx >= 0, nx < width, ny >= 0, ny < height else { continue }
+                        let neighbor = ny * width + nx
+                        guard !visited[neighbor], pixels[neighbor * 4 + 3] >= 16 else { continue }
+                        visited[neighbor] = true
+                        queue.append(neighbor)
+                    }
+                }
+            }
+            if component.count > largest.count { largest = component }
+        }
+        guard !largest.isEmpty else { throw AtlasError.invalidAsset }
+        var kept = [Bool](repeating: false, count: width * height)
+        for index in largest { kept[index] = true }
+        for index in 0..<(width * height) where !kept[index] {
+            let offset = index * 4
+            pixels[offset] = 0
+            pixels[offset + 1] = 0
+            pixels[offset + 2] = 0
+            pixels[offset + 3] = 0
+        }
+        guard let provider = CGDataProvider(data: Data(pixels) as CFData),
+              let cleaned = CGImage(width: width, height: height, bitsPerComponent: 8,
+                bitsPerPixel: 32, bytesPerRow: bytesPerRow, space: colorSpace,
+                bitmapInfo: CGBitmapInfo(rawValue: bitmapInfo), provider: provider,
+                decode: nil, shouldInterpolate: true, intent: .defaultIntent) else {
+            throw AtlasError.invalidAsset
+        }
+        return NSImage(cgImage: cleaned, size: NSSize(width: 128, height: 128))
+    }
+
     func stop() { timer?.invalidate(); timer = nil }
+
+    func beginClimbing() {
+        climbingStarted = clock()
+        isSitting = false
+        clickReactionStarted = nil
+        displayedFrame = climbingFrames[0]
+        displayedFrameIsPerch = true
+        needsDisplay = true
+    }
+
+    func finishClimbing() {
+        climbingStarted = nil
+        isSitting = true
+        displayedFrame = sittingFrames[0]
+        displayedFrameIsPerch = true
+        needsDisplay = true
+    }
+
+    func stand() {
+        climbingStarted = nil
+        isSitting = false
+        displayedFrame = idleFrames[0]
+        displayedFrameIsPerch = false
+        needsDisplay = true
+    }
 
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 
@@ -97,11 +230,26 @@ final class SpriteView: NSView {
         return artworkContains(point)
     }
 
-    private func artworkContains(_ point: NSPoint) -> Bool {
+    func artworkContains(_ point: NSPoint) -> Bool {
         guard bounds.contains(point) else { return false }
         let sample = NSRect(x: point.x, y: point.y, width: 1, height: 1)
-        return displayedFrame.hitTest(sample, withDestinationRect: bounds,
+        return displayedFrame.hitTest(sample, withDestinationRect: frameRect,
                                       context: nil, hints: nil, flipped: true)
+    }
+
+    func perchFrameContains(_ index: Int, point: NSPoint) -> Bool {
+        let frames = climbingFrames + sittingFrames
+        guard frames.indices.contains(index) else { return false }
+        let sample = NSRect(x: point.x, y: point.y, width: 1, height: 1)
+        return frames[index].hitTest(sample,
+            withDestinationRect: NSRect(x: 0, y: 0, width: 128, height: 128),
+            context: nil, hints: nil, flipped: true)
+    }
+
+    private var frameRect: NSRect {
+        displayedFrameIsPerch
+            ? NSRect(x: 0, y: 15, width: 128, height: 128)
+            : NSRect(x: (bounds.width - 84) / 2, y: 0, width: 84, height: 156)
     }
 
     private func screenPoint(for event: NSEvent) -> NSPoint {
@@ -124,6 +272,7 @@ final class SpriteView: NSView {
         let distance = hypot(pointer.x - dragOrigin.x, pointer.y - dragOrigin.y)
         if !dragged, distance >= 3 {
             dragged = true
+            stand()
             panel.draggingPet = true
             eventSink?(.dragBegan)
         }
@@ -178,6 +327,7 @@ final class SpriteView: NSView {
         if let panel = window as? PetPanel, panel.movementDirection != 0 {
             let frames = panel.movementDirection > 0 ? runningRight : runningLeft
             displayedFrame = frames[Int(now / 0.12) % frames.count]
+            displayedFrameIsPerch = false
             needsDisplay = true
             return
         }
@@ -191,10 +341,26 @@ final class SpriteView: NSView {
             }
             if index < clickReaction.count {
                 displayedFrame = clickReaction[index]
+                displayedFrameIsPerch = false
                 needsDisplay = true
                 return
             }
             clickReactionStarted = nil
+        }
+        if let climbingStarted {
+            let index = min(climbingFrames.count - 1,
+                            Int((now - climbingStarted) /
+                                (Self.climbDuration / Double(climbingFrames.count))))
+            displayedFrame = climbingFrames[max(0, index)]
+            displayedFrameIsPerch = true
+            needsDisplay = true
+            return
+        }
+        if isSitting {
+            displayedFrame = sittingFrames[Int(now / 0.22) % sittingFrames.count]
+            displayedFrameIsPerch = true
+            needsDisplay = true
+            return
         }
         let pet = ScreenCoordinates.quartz(window.frame)
         let cocoaPointer = pointer()
@@ -206,6 +372,7 @@ final class SpriteView: NSView {
             let angle = (atan2(dx, -dy) + 2 * .pi).truncatingRemainder(dividingBy: 2 * .pi)
             let index = Int((angle / (.pi / 8)).rounded()) % 16
             displayedFrame = gazeFrames[index / 8][index % 8]
+            displayedFrameIsPerch = false
         } else {
             let durations = [0.28, 0.11, 0.11, 0.14, 0.14, 0.32]
             var phase = (now - started)
@@ -216,12 +383,13 @@ final class SpriteView: NSView {
                 index += 1
             }
             displayedFrame = idleFrames[index]
+            displayedFrameIsPerch = false
         }
         needsDisplay = true
     }
 
     override func draw(_ dirtyRect: NSRect) {
-        displayedFrame.draw(in: bounds, from: .zero, operation: .sourceOver, fraction: 1,
+        displayedFrame.draw(in: frameRect, from: .zero, operation: .sourceOver, fraction: 1,
                    respectFlipped: true, hints: [.interpolation: NSImageInterpolation.high])
     }
 }
@@ -246,6 +414,7 @@ final class PetOverlay {
     let panel: PetPanel
     private let sprite: SpriteView
     private var movementTimer: Timer?
+    private var perchRequested = false
     private let clock: () -> Double
     private(set) var generation: UInt64 = 0
     private(set) var lastPlacement: PetRect?
@@ -253,6 +422,8 @@ final class PetOverlay {
     var onInteraction: ((PetInteractionEvent) -> Void)?
     var isMoving: Bool { movementTimer != nil }
     var isDragging: Bool { panel.draggingPet }
+    var isPerched: Bool { perchRequested }
+    var isSitting: Bool { perchRequested && sprite.isSitting }
 
     init(clock: @escaping () -> Double = { ProcessInfo.processInfo.systemUptime }) throws {
         self.clock = clock
@@ -263,6 +434,10 @@ final class PetOverlay {
         sprite.eventSink = { [weak self] event in
             guard let self else { return }
             switch event {
+            case .dragBegan:
+                perchRequested = false
+                cancelMovement()
+                sprite.stand()
             case .dragChanged(let placement), .movementEnded(let placement):
                 displayedPlacement = placement
             case .dragEnded(let placement):
@@ -289,6 +464,8 @@ final class PetOverlay {
         generation &+= 1
         if hiding {
             cancelMovement()
+            perchRequested = false
+            sprite.stand()
             panel.pressingPet = false
             panel.draggingPet = false
             sprite.cancelInteraction()
@@ -310,6 +487,8 @@ final class PetOverlay {
         guard expected == generation else { return false }
         guard let placement else {
             cancelMovement()
+            perchRequested = false
+            sprite.stand()
             panel.pressingPet = false
             panel.draggingPet = false
             sprite.cancelInteraction()
@@ -319,6 +498,8 @@ final class PetOverlay {
             return true
         }
         cancelMovement()
+        perchRequested = false
+        sprite.stand()
         panel.setFrame(ScreenCoordinates.appKit(placement), display: true)
         lastPlacement = placement
         displayedPlacement = ScreenCoordinates.quartz(panel.frame)
@@ -333,6 +514,8 @@ final class PetOverlay {
             return false
         }
         cancelMovement()
+        perchRequested = false
+        sprite.stand()
         let dx = placement.x - from.x
         let dy = placement.y - from.y
         let distance = hypot(dx, dy)
@@ -362,6 +545,92 @@ final class PetOverlay {
             }
         }
         return true
+    }
+
+    @discardableResult
+    func perch(at placement: PetRect, generation expected: UInt64) -> Bool {
+        guard expected == generation else { return false }
+        cancelMovement()
+        perchRequested = true
+        sprite.stand()
+        panel.acceptsPetInput = false
+        panel.ignoresMouseEvents = true
+
+        guard panel.isVisible, let from = displayedPlacement ?? lastPlacement else {
+            panel.setFrame(ScreenCoordinates.appKit(placement), display: true)
+            lastPlacement = placement
+            displayedPlacement = ScreenCoordinates.quartz(panel.frame)
+            panel.orderFrontRegardless()
+            startClimbing(at: placement)
+            return true
+        }
+
+        let distance = hypot(placement.x - from.x, placement.y - from.y)
+        guard distance >= 1 else {
+            startClimbing(at: placement)
+            return true
+        }
+        let duration = min(1.8, max(0.35, distance / 420))
+        let started = clock()
+        panel.movementDirection = placement.x >= from.x ? 1 : -1
+        movementTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 60.0, repeats: true) {
+            [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                let progress = min(1, (self.clock() - started) / duration)
+                let current = PetMotion.placement(from: from, to: placement, progress: progress)
+                self.panel.setFrame(ScreenCoordinates.appKit(current), display: true)
+                self.displayedPlacement = ScreenCoordinates.quartz(self.panel.frame)
+                if progress >= 1 {
+                    self.movementTimer?.invalidate()
+                    self.movementTimer = nil
+                    self.panel.movementDirection = 0
+                    self.startClimbing(at: placement)
+                }
+            }
+        }
+        return true
+    }
+
+    @discardableResult
+    func followPerch(at placement: PetRect, generation expected: UInt64) -> Bool {
+        guard expected == generation, perchRequested, sprite.isSitting else { return false }
+        panel.setFrame(ScreenCoordinates.appKit(placement), display: true)
+        lastPlacement = placement
+        displayedPlacement = ScreenCoordinates.quartz(panel.frame)
+        panel.orderFrontRegardless()
+        return true
+    }
+
+    func leavePerch() {
+        guard perchRequested else { return }
+        cancelMovement()
+        perchRequested = false
+        sprite.stand()
+        panel.acceptsPetInput = true
+    }
+
+    private func startClimbing(at placement: PetRect) {
+        guard perchRequested else { return }
+        panel.movementDirection = 0
+        sprite.beginClimbing()
+        let started = clock()
+        movementTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 60.0, repeats: true) {
+            [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self, self.perchRequested else { return }
+                if self.clock() - started >= SpriteView.climbDuration {
+                    self.movementTimer?.invalidate()
+                    self.movementTimer = nil
+                    self.sprite.finishClimbing()
+                    self.panel.acceptsPetInput = true
+                    self.lastPlacement = placement
+                    let displayed = ScreenCoordinates.quartz(self.panel.frame)
+                    self.displayedPlacement = displayed
+                    self.onInteraction?(.movementEnded(displayed))
+                }
+            }
+        }
     }
 
     private func cancelMovement() {

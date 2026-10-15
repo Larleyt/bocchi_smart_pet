@@ -39,10 +39,12 @@ actor ScreenAnalyzer {
         displayID: UInt32,
         screenBounds: PetRect,
         region: PetRect,
-        ownBundleID: String
+        ownBundleID: String,
+        ignoringSupportEdgeY: Double? = nil
     ) async throws -> PixelSample {
         try Self.validate(screenBounds)
         try Self.validate(region)
+        try Self.validate(ignoringSupportEdgeY, in: region)
         guard screenBounds.contains(region) else {
             throw ScreenAnalyzerError.invalidGeometry("capture region is outside the display")
         }
@@ -96,11 +98,16 @@ actor ScreenAnalyzer {
             contentFilter: filter,
             configuration: configuration
         )
-        return try sample(image: image, bounds: region)
+        return try sample(image: image, bounds: region, ignoringSupportEdgeY: ignoringSupportEdgeY)
     }
 
-    func sample(image: CGImage, bounds: PetRect) throws -> PixelSample {
+    func sample(
+        image: CGImage,
+        bounds: PetRect,
+        ignoringSupportEdgeY: Double? = nil
+    ) throws -> PixelSample {
         try Self.validateImage(image, bounds: bounds)
+        try Self.validate(ignoringSupportEdgeY, in: bounds)
 
         let request = VNRecognizeTextRequest()
         request.recognitionLevel = .accurate
@@ -112,7 +119,11 @@ actor ScreenAnalyzer {
         }
         return PixelSample(
             bounds: bounds,
-            obstacles: textRects + (try Self.visualDetailRects(image: image, screenBounds: bounds)),
+            obstacles: textRects + (try Self.visualDetailRects(
+                image: image,
+                screenBounds: bounds,
+                ignoringSupportEdgeY: ignoringSupportEdgeY
+            )),
             fingerprint: try Self.fingerprint(image: image)
         )
     }
@@ -142,6 +153,13 @@ actor ScreenAnalyzer {
               rect.maxX.isFinite, rect.maxY.isFinite
         else {
             throw ScreenAnalyzerError.invalidGeometry("rectangle must be finite and non-empty")
+        }
+    }
+
+    private static func validate(_ edgeY: Double?, in bounds: PetRect) throws {
+        guard let edgeY else { return }
+        guard edgeY.isFinite, edgeY >= bounds.y, edgeY <= bounds.maxY else {
+            throw ScreenAnalyzerError.invalidGeometry("support edge must be finite and inside the image bounds")
         }
     }
 
@@ -211,7 +229,11 @@ actor ScreenAnalyzer {
         return try PixelFingerprint(rgb: rgb)
     }
 
-    private static func visualDetailRects(image: CGImage, screenBounds: PetRect) throws -> [PetRect] {
+    private static func visualDetailRects(
+        image: CGImage,
+        screenBounds: PetRect,
+        ignoringSupportEdgeY: Double?
+    ) throws -> [PetRect] {
         let sampleWidth = min(image.width, 512)
         let sampleHeight = min(image.height, 320)
         var pixels = [UInt8](repeating: 0, count: sampleWidth * sampleHeight)
@@ -234,6 +256,12 @@ actor ScreenAnalyzer {
         let columns = max(1, min(96, Int(ceil(screenBounds.width / 32))))
         let rows = max(1, min(64, Int(ceil(screenBounds.height / 32))))
         var detailed = [Bool](repeating: false, count: columns * rows)
+        let ignoredRows: Range<Int>? = ignoringSupportEdgeY.map { edgeY in
+            let scale = Double(sampleHeight) / screenBounds.height
+            let start = max(0, Int(floor((edgeY - 1 - screenBounds.y) * scale)))
+            let end = min(sampleHeight, Int(ceil((edgeY + 1 - screenBounds.y) * scale)))
+            return start..<max(start, end)
+        }
 
         for row in 0..<rows {
             let y0 = row * sampleHeight / rows
@@ -243,27 +271,42 @@ actor ScreenAnalyzer {
                 let x1 = max(x0 + 1, (column + 1) * sampleWidth / columns)
                 var minimum = UInt8.max
                 var maximum = UInt8.min
+                var maximumContrast = 0
+                var hasValues = false
                 var edges = 0
                 var comparisons = 0
 
                 for y in y0..<min(y1, sampleHeight) {
+                    if ignoredRows?.contains(y) == true {
+                        if hasValues {
+                            maximumContrast = max(maximumContrast, Int(maximum) - Int(minimum))
+                            minimum = .max
+                            maximum = .min
+                            hasValues = false
+                        }
+                        continue
+                    }
                     for x in x0..<min(x1, sampleWidth) {
                         let value = pixels[y * sampleWidth + x]
+                        hasValues = true
                         minimum = min(minimum, value)
                         maximum = max(maximum, value)
                         if x > x0 {
                             edges += abs(Int(value) - Int(pixels[y * sampleWidth + x - 1])) >= 8 ? 1 : 0
                             comparisons += 1
                         }
-                        if y > y0 {
+                        if y > y0, ignoredRows?.contains(y - 1) != true {
                             edges += abs(Int(value) - Int(pixels[(y - 1) * sampleWidth + x])) >= 8 ? 1 : 0
                             comparisons += 1
                         }
                     }
                 }
+                if hasValues {
+                    maximumContrast = max(maximumContrast, Int(maximum) - Int(minimum))
+                }
                 let edgeRatio = comparisons == 0 ? 0 : Double(edges) / Double(comparisons)
                 // Low-contrast native button borders are occupied too, even when their title is outside the crop.
-                detailed[row * columns + column] = Int(maximum) - Int(minimum) >= 16 && edgeRatio >= 0.015
+                detailed[row * columns + column] = maximumContrast >= 16 && edgeRatio >= 0.015
             }
         }
 

@@ -32,6 +32,10 @@ enum RuntimeSelfTest {
             overlay = panel
             defer { panel.stop() }
             try await InteractionCheck.run(check)
+            try await PerchAnimationCheck.run(check)
+            try SupportGeometryCheck.run(check)
+            try await PerchPixelCheck.run(check)
+            try await PerchSessionCheck.run(check)
             try await VisualGeometryCheck.run(check)
             try check(panel.panel.ignoresMouseEvents && !panel.panel.canBecomeKey && !panel.panel.canBecomeMain,
                       "overlay does not intercept clicks or focus")

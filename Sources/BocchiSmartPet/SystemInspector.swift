@@ -7,12 +7,15 @@ struct WindowRegion: Sendable, Equatable {
     let id: UInt32
     let pid: Int32
     let bounds: PetRect
+    let rawBounds: PetRect
     let isOpaque: Bool
 
-    init(id: UInt32, pid: Int32, bounds: PetRect, isOpaque: Bool = true) {
+    init(id: UInt32, pid: Int32, bounds: PetRect, rawBounds: PetRect? = nil,
+         isOpaque: Bool = true) {
         self.id = id
         self.pid = pid
         self.bounds = bounds
+        self.rawBounds = rawBounds ?? bounds
         self.isOpaque = isOpaque
     }
 }
@@ -22,6 +25,16 @@ struct SystemSnapshot: Sendable {
     let unknownAreas: [PetRect]
     let windows: [WindowRegion]
     let accessibilityAvailable: Bool
+    let supports: [PerchSupport]
+
+    init(obstacles: [PetRect], unknownAreas: [PetRect], windows: [WindowRegion],
+         accessibilityAvailable: Bool, supports: [PerchSupport] = []) {
+        self.obstacles = obstacles
+        self.unknownAreas = unknownAreas
+        self.windows = windows
+        self.accessibilityAvailable = accessibilityAvailable
+        self.supports = supports
+    }
 }
 
 enum SystemInspectorError: Error, LocalizedError {
@@ -74,10 +87,13 @@ actor SystemInspector {
                   let boundsValue = item[kCGWindowBounds as String],
                   CFGetTypeID(boundsValue as CFTypeRef) == CFDictionaryGetTypeID(),
                   let dictionary = boundsValue as? [String: CGFloat],
-                  let bounds = CGRect(dictionaryRepresentation: dictionary as CFDictionary),
-                  let clipped = intersection(petRect(bounds), screen)
+                  let bounds = CGRect(dictionaryRepresentation: dictionary as CFDictionary)
             else { return nil }
-            return WindowRegion(id: id, pid: pid, bounds: clipped, isOpaque: alpha >= 1)
+            let rawBounds = petRect(bounds)
+            guard let clipped = intersection(rawBounds, screen) else { return nil }
+            return WindowRegion(
+                id: id, pid: pid, bounds: clipped, rawBounds: rawBounds, isOpaque: alpha >= 1
+            )
         }
     }
 
@@ -101,7 +117,8 @@ actor SystemInspector {
         let clippedWindows = windows.compactMap { window -> WindowRegion? in
             guard let bounds = Self.intersection(window.bounds, screenBounds) else { return nil }
             return WindowRegion(
-                id: window.id, pid: window.pid, bounds: bounds, isOpaque: window.isOpaque
+                id: window.id, pid: window.pid, bounds: bounds,
+                rawBounds: window.rawBounds, isOpaque: window.isOpaque
             )
         }
         guard AXIsProcessTrusted() else {
@@ -129,6 +146,7 @@ actor SystemInspector {
         var unknown = visibility.unknown
         if trace, !unknown.isEmpty { report("unrepresented-regions") }
         var obstacles: [PetRect] = []
+        var supports: [PerchSupport] = []
         var remainingNodes = Self.maximumAXNodes
         let clock = ContinuousClock()
         let deadline = clock.now.advanced(by: Self.maximumAXDuration)
@@ -151,7 +169,7 @@ actor SystemInspector {
                 clock: clock,
                 trace: trace ? report : nil
             )
-            guard let match = Self.bestMatch(for: window.bounds, in: candidates) else {
+            guard let match = Self.bestMatch(for: window.rawBounds, in: candidates) else {
                 if trace { report("window-mismatch") }
                 applicationWindows[window.pid] = candidates
                 unknown.append(contentsOf: visibleRegions[index])
@@ -159,6 +177,12 @@ actor SystemInspector {
             }
             let element = candidates.remove(at: match)
             applicationWindows[window.pid] = candidates
+            if let support = Self.perchSupport(
+                for: window, visibleRegions: visibleRegions[index], in: screenBounds,
+                foregroundWindows: Array(clippedWindows.prefix(index))
+            ) {
+                supports.append(support)
+            }
 
             let result = Self.inspect(
                 root: element.0,
@@ -179,7 +203,8 @@ actor SystemInspector {
             obstacles: obstacles,
             unknownAreas: unknown,
             windows: clippedWindows,
-            accessibilityAvailable: true
+            accessibilityAvailable: true,
+            supports: supports
         )
     }
 
@@ -213,11 +238,52 @@ actor SystemInspector {
         for element in elements {
             guard remainingNodes > 0, clock.now < deadline else { break }
             remainingNodes -= 1
+            guard attribute(element, kAXRoleAttribute as CFString) as? String
+                    == kAXWindowRole as String else { continue }
             if case .visible(let frame) = frame(of: element, deadline: deadline, clock: clock) {
                 windows.append((element, frame))
             }
         }
         return windows
+    }
+
+    nonisolated static func perchSupport(
+        for window: WindowRegion,
+        visibleRegions: [PetRect],
+        in screen: PetRect,
+        foregroundWindows: [WindowRegion] = []
+    ) -> PerchSupport? {
+        let top = window.rawBounds.y
+        guard window.isOpaque, valid(window.rawBounds), valid(screen),
+              top > screen.y, top < screen.maxY,
+              top == window.bounds.y else { return nil }
+
+        let spans = visibleRegions.compactMap { region -> HorizontalSpan? in
+            guard abs(region.y - top) < 0.5,
+                  region.height > 0,
+                  let edge = intersection(
+                    PetRect(x: region.x, y: top, width: region.width, height: 1),
+                    PetRect(x: screen.x, y: top, width: screen.width, height: 1)
+                  ) else { return nil }
+            return HorizontalSpan(minX: edge.x, maxX: edge.maxX)
+        }.sorted { $0.minX < $1.minX }
+        guard !spans.isEmpty else { return nil }
+        var merged: [HorizontalSpan] = []
+        for span in spans {
+            if let last = merged.last, span.minX <= last.maxX {
+                merged[merged.count - 1] = HorizontalSpan(
+                    minX: last.minX, maxX: max(last.maxX, span.maxX)
+                )
+            } else {
+                merged.append(span)
+            }
+        }
+        return PerchSupport(
+            id: SupportWindowID(windowID: window.id, pid: window.pid),
+            windowBounds: window.rawBounds,
+            spans: merged,
+            foregroundOcclusions: foregroundWindows.map(\.bounds)
+        )
     }
 
     private static func bestMatch(
