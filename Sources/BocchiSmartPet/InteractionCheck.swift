@@ -199,6 +199,117 @@ enum InteractionCheck {
         try check(events.contains(where: {
             if case .hoverEscapeRequested = $0 { true } else { false }
         }), "reshown pet starts a fresh five-second hover deadline")
+        for point in [NSPoint(x: 40, y: 30), NSPoint(x: 80, y: 30),
+                      NSPoint(x: 40, y: 82), NSPoint(x: 80, y: 82), NSPoint(x: 60, y: 78)] {
+            try await steadyHover(at: point, check)
+        }
+        try await steadyHover(at: NSPoint(x: 48, y: 40), seated: true, check)
+    }
+
+    private static func steadyHover(at point: NSPoint, seated: Bool = false,
+                                    _ check: (Bool, String) throws -> Void) async throws {
+        var fakeNow = 100.0
+        var fakePointer = NSPoint.zero
+        let overlay = try PetOverlay(clock: { fakeNow }, pointer: { fakePointer })
+        defer { overlay.stop() }
+        guard let sprite = overlay.panel.contentView as? SpriteView else {
+            throw InteractionCheckFailure.event
+        }
+        let session = PlacementSession(overlay: overlay)
+        let bounds = PetRect(x: 0, y: 0, width: 900, height: 640)
+        let support = PerchSupport(id: SupportID(windowID: 501, pid: 77, elementToken: 501),
+            bounds: PetRect(x: 100, y: 300, width: 700, height: 340),
+            spans: [HorizontalSpan(minX: 100, maxX: 800)])
+        let fakeSystem = SystemSnapshot(obstacles: [], unknownAreas: [bounds],
+            windows: [], accessibilityAvailable: true, supports: seated ? [support] : [])
+        let fingerprint = try PixelFingerprint(rgb: [UInt8](repeating: 220, count: 64 * 3))
+        func refresh() async -> CaptureOutcome {
+            await session.refresh(bounds: bounds, screenBounds: bounds, visualAllowed: true,
+                inspect: { fakeSystem }, capture: { region in
+                    PixelSample(bounds: region, obstacles: [], fingerprint: fingerprint)
+                }, capturePerch: { region, _ in
+                    PixelSample(bounds: region, obstacles: [], fingerprint: fingerprint,
+                                supportEdges: [HorizontalSpan(minX: region.x, maxX: region.maxX)])
+                }, current: { true }, cursor: {
+                    PetPoint(x: fakePointer.x, y: ScreenCoordinates.primaryHeight - fakePointer.y)
+                }, now: { fakeNow })
+        }
+        func rendered() -> Data? {
+            guard let bitmap = sprite.bitmapImageRepForCachingDisplay(in: sprite.bounds) else { return nil }
+            sprite.cacheDisplay(in: sprite.bounds, to: bitmap)
+            return bitmap.representation(using: .png, properties: [:])
+        }
+        var escapes = 0
+        var movementEnds = 0
+        overlay.onInteraction = { event in
+            switch event {
+            case .hoverEscapeRequested:
+                escapes += 1
+                session.escape()
+            case .movementEnded:
+                movementEnds += 1
+                session.invalidate()
+            default: break
+            }
+        }
+        _ = await refresh()
+        if seated {
+            fakeNow += 1
+            try await Task.sleep(for: .milliseconds(40))
+            try check(overlay.isSitting && !overlay.isMoving,
+                      "hover fixture reaches the actual seated pose through the session")
+            movementEnds = 0
+        }
+        guard let start = overlay.lastPlacement else { throw InteractionCheckFailure.event }
+        fakePointer = overlay.panel.convertPoint(toScreen:
+            sprite.convert(NSPoint(x: 1, y: 1), to: nil))
+        sprite.tick()
+        fakeNow += 6
+        sprite.tick()
+        try check(escapes == 0 && overlay.panel.ignoresMouseEvents,
+                  "six seconds on transparent pixels neither intercept input nor trigger escape")
+        fakePointer = overlay.panel.convertPoint(toScreen:
+            sprite.convert(point, to: nil))
+        sprite.tick()
+        guard let bitmap = sprite.bitmapImageRepForCachingDisplay(in: sprite.bounds) else {
+            throw InteractionCheckFailure.event
+        }
+        sprite.cacheDisplay(in: sprite.bounds, to: bitmap)
+        let alpha = bitmap.colorAt(x: Int(point.x * Double(bitmap.pixelsWide) / sprite.bounds.width),
+                                   y: Int(point.y * Double(bitmap.pixelsHigh) / sprite.bounds.height))?
+            .alphaComponent ?? 0
+        try check(alpha > 0.95 && sprite.artworkContains(point),
+                  "hover fixture \(point) is visibly opaque and receives input")
+        let gaze = rendered()
+        let repeated = await refresh()
+        try check(gaze != nil && gaze == rendered() && repeated == .shown(visual: true)
+                  && overlay.panel.isVisible && !overlay.isMoving,
+                  "unchanged session refresh preserves the rendered off-center gaze without flashing")
+        let hoveredAt = fakeNow
+        for step in 1...100 {
+            fakeNow = hoveredAt + Double(step) * 0.05
+            sprite.tick()
+            if step < 100 && step % 10 == 0 { _ = await refresh() }
+            if step == 99 {
+                try check(escapes == 0 && overlay.lastPlacement == start && !overlay.isMoving,
+                          "off-center hover stays stationary through repeated refreshes before five seconds")
+            }
+        }
+        try check(escapes == 1, "off-center native hover reaches the session once at five seconds")
+        _ = await refresh()
+        try check(overlay.isMoving && overlay.panel.isVisible && !overlay.isPerched,
+                  "off-center hover starts an actual visible escape through PlacementSession")
+        fakeNow += 0.15
+        try await Task.sleep(for: .milliseconds(40))
+        let intermediate = overlay.displayedPlacement
+        try check(overlay.isMoving && intermediate != start && overlay.panel.isVisible,
+                  "off-center escape crosses a real intermediate NSPanel position")
+        fakeNow += 2
+        try await Task.sleep(for: .milliseconds(40))
+        _ = await refresh()
+        try check(!overlay.isMoving && overlay.panel.isVisible && overlay.lastPlacement != start
+                  && movementEnds == 1 && escapes == 1,
+                  "off-center escape finishes once and remains visible after revalidation")
     }
 }
 

@@ -467,10 +467,12 @@ final class PetOverlay {
     var isSitting: Bool { perchRequested && sprite.isSitting }
 
     init(clock: @escaping () -> Double = { ProcessInfo.processInfo.systemUptime },
+         pointer: @escaping () -> NSPoint = { NSEvent.mouseLocation },
          runLeftAsset: URL? = nil,
          runRightAsset: URL? = nil) throws {
         self.clock = clock
-        sprite = try SpriteView(runLeftAsset: runLeftAsset, runRightAsset: runRightAsset, clock: clock)
+        sprite = try SpriteView(runLeftAsset: runLeftAsset, runRightAsset: runRightAsset,
+                                pointer: pointer, clock: clock)
         panel = PetPanel(contentRect: .zero, styleMask: [.borderless, .nonactivatingPanel],
                          backing: .buffered, defer: false)
         panel.contentView = sprite
@@ -538,6 +540,10 @@ final class PetOverlay {
             panel.orderOut(nil)
             lastPlacement = nil
             displayedPlacement = nil
+            return true
+        }
+        if !isMoving, !perchRequested, panel.isVisible, displayedPlacement == placement {
+            panel.acceptsPetInput = true
             return true
         }
         cancelMovement()
