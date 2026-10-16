@@ -18,10 +18,10 @@ enum InteractionCheck {
         try check(!state.escapeIsDue(now: 44.99), "release starts a fresh hover delay")
         try check(state.escapeIsDue(now: 45), "hover escape resumes five seconds after release")
 
-        let start = PetRect(x: 10, y: 20, width: 84, height: 156)
-        let end = PetRect(x: 110, y: 220, width: 84, height: 156)
+        let start = PetRect(x: 10, y: 20, width: 120, height: 156)
+        let end = PetRect(x: 110, y: 220, width: 120, height: 156)
         try check(PetMotion.placement(from: start, to: end, progress: 0.5)
-                  == PetRect(x: 60, y: 120, width: 84, height: 156),
+                  == PetRect(x: 60, y: 120, width: 120, height: 156),
                   "movement crosses the actual midpoint")
         try check(PetMotion.placement(from: start, to: end, progress: 1) == end,
                   "movement finishes at the requested placement")
@@ -71,7 +71,7 @@ enum InteractionCheck {
         try check(!overlay.isMoving && !overlay.panel.isVisible && overlay.panel.frame == cancelledFrame,
                   "hard invalidation cancels movement without stale frames")
 
-        let realDropStart = PetRect(x: 30, y: 30, width: 84, height: 156)
+        let realDropStart = PetRect(x: 30, y: 30, width: 120, height: 156)
         try check(overlay.publish(placement: realDropStart, generation: overlay.generation),
                   "real overlay drop fixture publishes its start")
         guard let realSprite = overlay.panel.contentView as? SpriteView else {
@@ -89,7 +89,7 @@ enum InteractionCheck {
             }
             return event
         }
-        let realArtwork = NSPoint(x: 42, y: 78)
+        let realArtwork = NSPoint(x: 60, y: 78)
         realSprite.mouseDown(with: try realMouse(.leftMouseDown, realArtwork))
         realSprite.mouseDragged(with: try realMouse(.leftMouseDragged, NSPoint(x: 64, y: 78)))
         realSprite.mouseUp(with: try realMouse(.leftMouseUp, NSPoint(x: 64, y: 78)))
@@ -109,7 +109,7 @@ enum InteractionCheck {
         var fakePointer = NSPoint.zero
         let sprite = try SpriteView(pointer: { fakePointer }, clock: { fakeNow }, startsTimer: false)
         defer { sprite.stop() }
-        let panel = PetPanel(contentRect: NSRect(x: 180, y: 180, width: 84, height: 156),
+        let panel = PetPanel(contentRect: NSRect(x: 180, y: 180, width: 120, height: 156),
                              styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
         panel.contentView = sprite
         panel.backgroundColor = .clear
@@ -133,7 +133,7 @@ enum InteractionCheck {
             view.cacheDisplay(in: view.bounds, to: bitmap)
             return bitmap.representation(using: .png, properties: [:])
         }
-        let artwork = NSPoint(x: 42, y: 78)
+        let artwork = NSPoint(x: 60, y: 78)
         let beforeClick = rendered(sprite)
         sprite.mouseDown(with: try mouse(.leftMouseDown, artwork))
         sprite.mouseUp(with: try mouse(.leftMouseUp, artwork))

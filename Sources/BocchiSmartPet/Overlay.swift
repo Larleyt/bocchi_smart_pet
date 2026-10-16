@@ -40,6 +40,9 @@ final class SpriteView: NSView {
     private let started: Double
     private var displayedFrame: NSImage
     private var displayedFrameIsPerch = false
+    private var displayedFrameIsRunning = false
+    private var runningStarted: Double?
+    private var runningDirection = 0
     private var interaction = PetInteractionState()
     private var clickReactionStarted: Double?
     private var climbingStarted: Double?
@@ -54,6 +57,7 @@ final class SpriteView: NSView {
 
     init(asset: URL? = nil,
          perchAsset: URL? = nil,
+         runPartsAsset: URL? = nil,
          pointer: @escaping () -> NSPoint = { NSEvent.mouseLocation },
          clock: @escaping () -> Double = { ProcessInfo.processInfo.systemUptime },
          startsTimer: Bool = true) throws {
@@ -78,9 +82,13 @@ final class SpriteView: NSView {
             return images
         }
         idleFrames = try row(0, count: 6)
-        // Running poses are wider than standing poses; retain the full gait inside the fixed pet window.
-        runningRight = try row(1, count: 8, inset: 16, width: 160)
-        runningLeft = try row(2, count: 8, inset: 16, width: 160)
+        let runURL = runPartsAsset
+                ?? Bundle.main.url(forResource: "bocchi-run-parts", withExtension: "png")
+                ?? URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+                    .appendingPathComponent("Assets/bocchi-run-parts.png")
+        let runFrames = try NativeRunRig.frames(asset: runURL)
+        runningRight = runFrames.right
+        runningLeft = runFrames.left
         let waiting = try row(6, count: 6)
         clickReaction = try row(7, count: 6) + waiting.suffix(2)
         gazeFrames = [try row(9, count: 8), try row(10, count: 8)]
@@ -110,7 +118,7 @@ final class SpriteView: NSView {
                     guard let image = perchAtlas.cropping(to: CGRect(
                         x: x0, y: y0, width: x1 - x0, height: y1 - y0
                     )) else { throw AtlasError.invalidAsset }
-                    return try Self.cleanedPerchFrame(image)
+                    return try Self.cleanedSpriteFrame(image, size: NSSize(width: 128, height: 128))
                 }
             }
             let climbing = try perchFrames(0..<8)
@@ -130,7 +138,7 @@ final class SpriteView: NSView {
 
     required init?(coder: NSCoder) { nil }
 
-    private static func cleanedPerchFrame(_ image: CGImage) throws -> NSImage {
+    static func cleanedSpriteFrame(_ image: CGImage, size: NSSize) throws -> NSImage {
         let width = image.width
         let height = image.height
         let bytesPerRow = width * 4
@@ -192,34 +200,54 @@ final class SpriteView: NSView {
                 decode: nil, shouldInterpolate: true, intent: .defaultIntent) else {
             throw AtlasError.invalidAsset
         }
-        return NSImage(cgImage: cleaned, size: NSSize(width: 128, height: 128))
+        return NSImage(cgImage: cleaned, size: size)
     }
 
     func stop() { timer?.invalidate(); timer = nil }
 
     func beginClimbing() {
+        endRunning()
         climbingStarted = clock()
         isSitting = false
         clickReactionStarted = nil
         displayedFrame = climbingFrames[0]
         displayedFrameIsPerch = true
+        displayedFrameIsRunning = false
         needsDisplay = true
     }
 
     func finishClimbing() {
+        endRunning()
         climbingStarted = nil
         isSitting = true
         displayedFrame = sittingFrames[0]
         displayedFrameIsPerch = true
+        displayedFrameIsRunning = false
         needsDisplay = true
     }
 
     func stand() {
+        endRunning()
         climbingStarted = nil
         isSitting = false
         displayedFrame = idleFrames[0]
         displayedFrameIsPerch = false
+        displayedFrameIsRunning = false
         needsDisplay = true
+    }
+
+    func beginRunning(direction: Int) {
+        runningDirection = direction >= 0 ? 1 : -1
+        runningStarted = clock()
+        displayedFrame = runningDirection > 0 ? runningRight[0] : runningLeft[0]
+        displayedFrameIsPerch = false
+        displayedFrameIsRunning = true
+        needsDisplay = true
+    }
+
+    func endRunning() {
+        runningStarted = nil
+        runningDirection = 0
     }
 
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
@@ -247,9 +275,19 @@ final class SpriteView: NSView {
     }
 
     private var frameRect: NSRect {
-        displayedFrameIsPerch
-            ? NSRect(x: 0, y: 15, width: 128, height: 128)
-            : NSRect(x: (bounds.width - 84) / 2, y: 0, width: 84, height: 156)
+        if displayedFrameIsPerch {
+            return NSRect(x: 0, y: 15, width: 128, height: 128)
+        }
+        if displayedFrameIsRunning {
+            let scale = min(bounds.width / displayedFrame.size.width,
+                            bounds.height / displayedFrame.size.height)
+            let size = NSSize(width: displayedFrame.size.width * scale,
+                              height: displayedFrame.size.height * scale)
+            return NSRect(x: (bounds.width - size.width) / 2,
+                          y: (bounds.height - size.height) / 2,
+                          width: size.width, height: size.height)
+        }
+        return NSRect(x: (bounds.width - 84) / 2, y: 0, width: 84, height: 156)
     }
 
     private func screenPoint(for event: NSEvent) -> NSPoint {
@@ -324,10 +362,11 @@ final class SpriteView: NSView {
                 eventSink?(.hoverEscapeRequested(ScreenCoordinates.quartz(window.frame)))
             }
         }
-        if let panel = window as? PetPanel, panel.movementDirection != 0 {
-            let frames = panel.movementDirection > 0 ? runningRight : runningLeft
-            displayedFrame = frames[Int(now / 0.12) % frames.count]
+        if let runningStarted, runningDirection != 0 {
+            let frames = runningDirection > 0 ? runningRight : runningLeft
+            displayedFrame = frames[Int(max(0, now - runningStarted) / 0.12) % frames.count]
             displayedFrameIsPerch = false
+            displayedFrameIsRunning = true
             needsDisplay = true
             return
         }
@@ -342,6 +381,7 @@ final class SpriteView: NSView {
             if index < clickReaction.count {
                 displayedFrame = clickReaction[index]
                 displayedFrameIsPerch = false
+                displayedFrameIsRunning = false
                 needsDisplay = true
                 return
             }
@@ -353,12 +393,14 @@ final class SpriteView: NSView {
                                 (Self.climbDuration / Double(climbingFrames.count))))
             displayedFrame = climbingFrames[max(0, index)]
             displayedFrameIsPerch = true
+            displayedFrameIsRunning = false
             needsDisplay = true
             return
         }
         if isSitting {
             displayedFrame = sittingFrames[Int(now / 0.22) % sittingFrames.count]
             displayedFrameIsPerch = true
+            displayedFrameIsRunning = false
             needsDisplay = true
             return
         }
@@ -373,6 +415,7 @@ final class SpriteView: NSView {
             let index = Int((angle / (.pi / 8)).rounded()) % 16
             displayedFrame = gazeFrames[index / 8][index % 8]
             displayedFrameIsPerch = false
+            displayedFrameIsRunning = false
         } else {
             let durations = [0.28, 0.11, 0.11, 0.14, 0.14, 0.32]
             var phase = (now - started)
@@ -384,6 +427,7 @@ final class SpriteView: NSView {
             }
             displayedFrame = idleFrames[index]
             displayedFrameIsPerch = false
+            displayedFrameIsRunning = false
         }
         needsDisplay = true
     }
@@ -410,7 +454,7 @@ final class PetPanel: NSPanel {
 
 @MainActor
 final class PetOverlay {
-    static let size = PetSize(width: 84, height: 156)
+    static let size = PetSize(width: 120, height: 156)
     let panel: PetPanel
     private let sprite: SpriteView
     private var movementTimer: Timer?
@@ -425,9 +469,10 @@ final class PetOverlay {
     var isPerched: Bool { perchRequested }
     var isSitting: Bool { perchRequested && sprite.isSitting }
 
-    init(clock: @escaping () -> Double = { ProcessInfo.processInfo.systemUptime }) throws {
+    init(clock: @escaping () -> Double = { ProcessInfo.processInfo.systemUptime },
+         runPartsAsset: URL? = nil) throws {
         self.clock = clock
-        sprite = try SpriteView(clock: clock)
+        sprite = try SpriteView(runPartsAsset: runPartsAsset, clock: clock)
         panel = PetPanel(contentRect: .zero, styleMask: [.borderless, .nonactivatingPanel],
                          backing: .buffered, defer: false)
         panel.contentView = sprite
@@ -523,6 +568,7 @@ final class PetOverlay {
         let duration = min(1.8, max(0.35, distance / 420))
         let started = clock()
         panel.movementDirection = dx >= 0 ? 1 : -1
+        sprite.beginRunning(direction: panel.movementDirection)
         panel.acceptsPetInput = false
         panel.ignoresMouseEvents = true
         movementTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 60.0, repeats: true) { [weak self] _ in
@@ -536,6 +582,7 @@ final class PetOverlay {
                     self.movementTimer?.invalidate()
                     self.movementTimer = nil
                     self.panel.movementDirection = 0
+                    self.sprite.stand()
                     self.panel.acceptsPetInput = true
                     self.lastPlacement = placement
                     let displayed = ScreenCoordinates.quartz(self.panel.frame)
@@ -573,6 +620,7 @@ final class PetOverlay {
         let duration = min(1.8, max(0.35, distance / 420))
         let started = clock()
         panel.movementDirection = placement.x >= from.x ? 1 : -1
+        sprite.beginRunning(direction: panel.movementDirection)
         movementTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 60.0, repeats: true) {
             [weak self] _ in
             MainActor.assumeIsolated {
@@ -637,6 +685,7 @@ final class PetOverlay {
         movementTimer?.invalidate()
         movementTimer = nil
         panel.movementDirection = 0
+        sprite.endRunning()
         panel.acceptsPetInput = true
     }
 

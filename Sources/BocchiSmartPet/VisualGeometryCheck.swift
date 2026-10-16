@@ -34,7 +34,7 @@ enum VisualGeometryCheck {
                   && sample.obstacles.contains { $0.intersects(leftBorder) },
                   "visual geometry keeps connected border detail occupied")
 
-        let size = PetSize(width: 84, height: 156)
+        let size = PetOverlay.size
         let center = PetRect(x: -42, y: -78, width: size.width, height: size.height)
         let placement = PlacementEngine.choose(
             in: bounds,

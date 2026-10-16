@@ -69,7 +69,7 @@ enum PerchSessionCheck {
         state.clock += 1
         _ = await refresh(scene(x: 140, y: 320, supports: false))
         try await finishMovement()
-        try check(!overlay.isPerched && overlay.lastPlacement?.width == 84,
+        try check(!overlay.isPerched && overlay.lastPlacement?.width == 120,
                   "lost or covered support returns to ordinary free placement")
 
         state.clock += 1
@@ -81,7 +81,7 @@ enum PerchSessionCheck {
         _ = await refresh(scene())
         try await finishMovement()
         try check(!overlay.isPerched && overlay.lastPlacement ==
-                  PetRect(x: 62, y: 80, width: 84, height: 156),
+                  PetRect(x: 44, y: 80, width: 120, height: 156),
                   "manual drop detaches the perch and retains the requested center")
 
         state.clock += 1

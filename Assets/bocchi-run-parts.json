@@ -1,0 +1,18 @@
+{
+  "torsoHeight": 138,
+  "torsoRightHip": { "x": 0.68, "y": 0.98 },
+  "torsoLeftHip": { "x": 0.32, "y": 0.98 },
+  "shoeHeight": 10,
+  "shoeRightAnkle": { "x": 0.24, "y": 0.5 },
+  "shoeLeftAnkle": { "x": 0.76, "y": 0.5 },
+  "parts": [
+    { "name": "torsoRight", "x": 56, "y": 36, "width": 457, "height": 472 },
+    { "name": "torsoLeft", "x": 634, "y": 35, "width": 470, "height": 473 },
+    { "name": "upperSleeve", "x": 1216, "y": 200, "width": 121, "height": 279 },
+    { "name": "foreSleeve", "x": 1522, "y": 205, "width": 139, "height": 278 },
+    { "name": "thigh", "x": 223, "y": 549, "width": 135, "height": 298 },
+    { "name": "calf", "x": 664, "y": 550, "width": 112, "height": 302 },
+    { "name": "shoeRight", "x": 1045, "y": 696, "width": 243, "height": 116 },
+    { "name": "shoeLeft", "x": 1443, "y": 696, "width": 238, "height": 116 }
+  ]
+}

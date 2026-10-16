@@ -18,6 +18,8 @@ mkdir -p "$staging_app/Contents/MacOS" "$staging_app/Contents/Resources"
 cp "$project_root/Assets/Info.plist" "$staging_app/Contents/Info.plist"
 cp "$project_root/Assets/bocchi-spritesheet.png" "$staging_app/Contents/Resources/bocchi-spritesheet.png"
 cp "$project_root/Assets/bocchi-perch-spritesheet.png" "$staging_app/Contents/Resources/bocchi-perch-spritesheet.png"
+cp "$project_root/Assets/bocchi-run-parts.png" "$staging_app/Contents/Resources/bocchi-run-parts.png"
+cp "$project_root/Assets/bocchi-run-parts.json" "$staging_app/Contents/Resources/bocchi-run-parts.json"
 install -m 755 "$binary_dir/BocchiSmartPet" "$staging_app/Contents/MacOS/BocchiSmartPet"
 
 plutil -lint "$staging_app/Contents/Info.plist"

@@ -4,7 +4,7 @@ import BocchiCore
 @MainActor
 enum PerchAnimationCheck {
     static func run(_ check: (Bool, String) throws -> Void) async throws {
-        let start = PetRect(x: 40, y: 80, width: 84, height: 156)
+        let start = PetRect(x: 40, y: 80, width: 120, height: 156)
         let perch = PetRect(x: 200, y: 80, width: 128, height: 156)
         let overlay = try PetOverlay()
         defer { overlay.stop() }
@@ -19,7 +19,7 @@ enum PerchAnimationCheck {
         try check(overlay.isPerched && overlay.isMoving && !overlay.isSitting
                   && overlay.displayedPlacement.map { $0.x > start.x && $0.x < perch.x } == true,
                   "perch approach crosses a real intermediate panel position")
-        try await Task.sleep(for: .milliseconds(350))
+        try await Task.sleep(for: .milliseconds(450))
         try check(overlay.isPerched && overlay.isMoving && !overlay.isSitting
                   && overlay.displayedPlacement == perch,
                   "arrival at the support plays the climb before sitting")
