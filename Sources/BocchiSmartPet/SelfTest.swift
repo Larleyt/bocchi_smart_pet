@@ -465,7 +465,7 @@ enum RuntimeSelfTest {
                       "five-second watcher samples only occupied region")
 
             let white = try PixelFingerprint(rgb: [UInt8](repeating: 255, count: 300))
-            let manualDrop = PetRect(x: 180, y: 260, width: 120, height: 156)
+            let manualDrop = PetRect(x: 180, y: 260, width: PetOverlay.size.width, height: PetOverlay.size.height)
             panel.publish(placement: manualDrop, generation: panel.generation)
             session.drop(at: manualDrop)
             capturedRegions = []
@@ -493,7 +493,7 @@ enum RuntimeSelfTest {
                     && !$0.intersects(smallObstacle)
             } == true && !capturedRegions.contains(bounds),
                       "small visual obstacle excludes its own bounds so relocation stays nearby")
-            let occupiedDrop = PetRect(x: 650, y: 480, width: 120, height: 156)
+            let occupiedDrop = PetRect(x: 650, y: 480, width: PetOverlay.size.width, height: PetOverlay.size.height)
             panel.publish(placement: occupiedDrop, generation: panel.generation)
             session.drop(at: occupiedDrop)
             capturedRegions = []
@@ -541,7 +541,7 @@ enum RuntimeSelfTest {
                       "turning visual opt-in on keeps the already safe quiet side strip")
             let rejectedRoomSystem = SystemSnapshot(obstacles: [], unknownAreas: [wideUnknown],
                 windows: [WindowRegion(id: 84, pid: 1, bounds: bounds)], accessibilityAvailable: true)
-            let rejectedDrop = PetRect(x: 24, y: 240, width: 120, height: 156)
+            let rejectedDrop = PetRect(x: 24, y: 240, width: PetOverlay.size.width, height: PetOverlay.size.height)
             panel.publish(placement: rejectedDrop, generation: panel.generation)
             session.drop(at: rejectedDrop)
             capturedRegions = []
@@ -657,7 +657,7 @@ enum RuntimeSelfTest {
             })
             capturedRegions = []
             clock += 1
-            session.drop(at: PetRect(x: 24, y: 242, width: 120, height: 156))
+            session.drop(at: PetRect(x: 24, y: 242, width: PetOverlay.size.width, height: PetOverlay.size.height))
             let limited = try await runSession(unknownScene(17), visual: true, pixels: {
                 PixelSample(bounds: $0, obstacles: [$0], fingerprint: white)
             })
@@ -684,7 +684,7 @@ enum RuntimeSelfTest {
 
             clock += 20
             capturedRegions = []
-            session.drop(at: PetRect(x: 24, y: 242, width: 120, height: 156))
+            session.drop(at: PetRect(x: 24, y: 242, width: PetOverlay.size.width, height: PetOverlay.size.height))
             let missedDetail = PetRect(x: 0, y: 0, width: 400, height: 640)
             let secondMapCandidate = try await runSession(unknownScene(19), visual: true,
                 usable: PetRect(x: 0, y: 242, width: 900, height: 156), pixels: { region in

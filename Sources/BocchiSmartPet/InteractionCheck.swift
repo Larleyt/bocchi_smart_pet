@@ -18,10 +18,10 @@ enum InteractionCheck {
         try check(!state.escapeIsDue(now: 44.99), "release starts a fresh hover delay")
         try check(state.escapeIsDue(now: 45), "hover escape resumes five seconds after release")
 
-        let start = PetRect(x: 10, y: 20, width: 120, height: 156)
-        let end = PetRect(x: 110, y: 220, width: 120, height: 156)
+        let start = PetRect(x: 10, y: 20, width: PetOverlay.size.width, height: PetOverlay.size.height)
+        let end = PetRect(x: 110, y: 220, width: PetOverlay.size.width, height: PetOverlay.size.height)
         try check(PetMotion.placement(from: start, to: end, progress: 0.5)
-                  == PetRect(x: 60, y: 120, width: 120, height: 156),
+                  == PetRect(x: 60, y: 120, width: PetOverlay.size.width, height: PetOverlay.size.height),
                   "movement crosses the actual midpoint")
         try check(PetMotion.placement(from: start, to: end, progress: 1) == end,
                   "movement finishes at the requested placement")
@@ -71,7 +71,7 @@ enum InteractionCheck {
         try check(!overlay.isMoving && !overlay.panel.isVisible && overlay.panel.frame == cancelledFrame,
                   "hard invalidation cancels movement without stale frames")
 
-        let realDropStart = PetRect(x: 30, y: 30, width: 120, height: 156)
+        let realDropStart = PetRect(x: 30, y: 30, width: PetOverlay.size.width, height: PetOverlay.size.height)
         try check(overlay.publish(placement: realDropStart, generation: overlay.generation),
                   "real overlay drop fixture publishes its start")
         guard let realSprite = overlay.panel.contentView as? SpriteView else {
@@ -89,10 +89,10 @@ enum InteractionCheck {
             }
             return event
         }
-        let realArtwork = NSPoint(x: 60, y: 78)
+        let realArtwork = NSPoint(x: PetOverlay.size.width / 2, y: 78)
         realSprite.mouseDown(with: try realMouse(.leftMouseDown, realArtwork))
-        realSprite.mouseDragged(with: try realMouse(.leftMouseDragged, NSPoint(x: 64, y: 78)))
-        realSprite.mouseUp(with: try realMouse(.leftMouseUp, NSPoint(x: 64, y: 78)))
+        realSprite.mouseDragged(with: try realMouse(.leftMouseDragged, NSPoint(x: PetOverlay.size.width / 2 + 4, y: 78)))
+        realSprite.mouseUp(with: try realMouse(.leftMouseUp, NSPoint(x: PetOverlay.size.width / 2 + 4, y: 78)))
         try check(realEvents.contains(where: {
             if case .dragEnded = $0 { true } else { false }
         }) && !overlay.panel.acceptsPetInput && overlay.panel.ignoresMouseEvents,
@@ -109,7 +109,7 @@ enum InteractionCheck {
         var fakePointer = NSPoint.zero
         let sprite = try SpriteView(pointer: { fakePointer }, clock: { fakeNow }, startsTimer: false)
         defer { sprite.stop() }
-        let panel = PetPanel(contentRect: NSRect(x: 180, y: 180, width: 120, height: 156),
+        let panel = PetPanel(contentRect: NSRect(x: 180, y: 180, width: PetOverlay.size.width, height: PetOverlay.size.height),
                              styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
         panel.contentView = sprite
         panel.backgroundColor = .clear
@@ -133,7 +133,7 @@ enum InteractionCheck {
             view.cacheDisplay(in: view.bounds, to: bitmap)
             return bitmap.representation(using: .png, properties: [:])
         }
-        let artwork = NSPoint(x: 60, y: 78)
+        let artwork = NSPoint(x: PetOverlay.size.width / 2, y: 78)
         let beforeClick = rendered(sprite)
         sprite.mouseDown(with: try mouse(.leftMouseDown, artwork))
         sprite.mouseUp(with: try mouse(.leftMouseUp, artwork))
@@ -161,8 +161,8 @@ enum InteractionCheck {
         events = []
         let originalFrame = panel.frame
         sprite.mouseDown(with: try mouse(.leftMouseDown, artwork))
-        sprite.mouseDragged(with: try mouse(.leftMouseDragged, NSPoint(x: 64, y: 78)))
-        sprite.mouseUp(with: try mouse(.leftMouseUp, NSPoint(x: 64, y: 78)))
+        sprite.mouseDragged(with: try mouse(.leftMouseDragged, NSPoint(x: PetOverlay.size.width / 2 + 4, y: 78)))
+        sprite.mouseUp(with: try mouse(.leftMouseUp, NSPoint(x: PetOverlay.size.width / 2 + 4, y: 78)))
         try check(events.first == .dragBegan && events.contains(where: {
             if case .dragChanged = $0 { true } else { false }
         }) && events.last.map {

@@ -26,6 +26,17 @@ enum PerchPixelCheck {
         )
         try check(!perched.obstacles.contains { $0.intersects(edgeBand) },
                   "trusted two-point support edge does not occupy its visual grid row")
+        try check(perched.supportEdges == [HorizontalSpan(minX: bounds.x, maxX: bounds.maxX)],
+                  "actual visible color step supplies a continuous support span")
+        let blankImage = try image(width: 320, height: 280) { context in
+            context.setFillColor(CGColor(gray: 0.82, alpha: 1))
+            context.fill(CGRect(x: 0, y: 0, width: 320, height: 280))
+        }
+        let blank = try await analyzer.sample(
+            image: blankImage, bounds: bounds, ignoringSupportEdgeY: edgeY
+        )
+        try check(blank.supportEdges.isEmpty,
+                  "blank pixels cannot turn an invisible layout rectangle into a support")
         let imprecise = try await analyzer.sample(
             image: edgeImage,
             bounds: bounds,
@@ -33,6 +44,19 @@ enum PerchPixelCheck {
         )
         try check(imprecise.obstacles.contains { $0.intersects(edgeBand) },
                   "support-edge exception stays limited to the precise native edge")
+        try check(imprecise.supportEdges.isEmpty,
+                  "a visible edge away from the proposed support cannot verify it")
+        let shortEdgeImage = try image(width: 320, height: 280) { context in
+            context.setFillColor(CGColor(gray: 0.18, alpha: 1))
+            context.fill(CGRect(x: 0, y: 0, width: 320, height: 280))
+            context.setFillColor(CGColor(gray: 0.82, alpha: 1))
+            context.fill(CGRect(x: 120, y: 0, width: 80, height: 138))
+        }
+        let shortEdge = try await analyzer.sample(
+            image: shortEdgeImage, bounds: bounds, ignoringSupportEdgeY: edgeY
+        )
+        try check(shortEdge.supportEdges == [HorizontalSpan(minX: -40, maxX: 40)],
+                  "short painted edge verifies only its actual horizontal span")
 
         let buttonImage = try image(width: 320, height: 280) { context in
             context.setFillColor(CGColor(gray: 0.18, alpha: 1))

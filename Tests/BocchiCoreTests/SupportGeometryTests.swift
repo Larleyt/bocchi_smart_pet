@@ -7,13 +7,13 @@ final class SupportGeometryTests: XCTestCase {
 
     func testChoosesNearestClearSeatOnVisibleWindowTop() throws {
         let left = PerchSupport(
-            id: SupportWindowID(windowID: 7, pid: 70),
-            windowBounds: PetRect(x: 100, y: 400, width: 700, height: 300),
+            id: SupportID(windowID: 7, pid: 70),
+            bounds: PetRect(x: 100, y: 400, width: 700, height: 300),
             spans: [HorizontalSpan(minX: 100, maxX: 800)]
         )
         let right = PerchSupport(
-            id: SupportWindowID(windowID: 8, pid: 80),
-            windowBounds: PetRect(x: 850, y: 350, width: 300, height: 350),
+            id: SupportID(windowID: 8, pid: 80),
+            bounds: PetRect(x: 850, y: 350, width: 300, height: 350),
             spans: [HorizontalSpan(minX: 850, maxX: 1150)]
         )
         let previous = PetRect(x: 760, y: 260, width: 84, height: 156)
@@ -29,8 +29,8 @@ final class SupportGeometryTests: XCTestCase {
 
     func testBlockedSeatSlidesToNearestClearPointOnSameEdge() throws {
         let support = PerchSupport(
-            id: SupportWindowID(windowID: 9, pid: 90),
-            windowBounds: PetRect(x: 100, y: 400, width: 700, height: 300),
+            id: SupportID(windowID: 9, pid: 90),
+            bounds: PetRect(x: 100, y: 400, width: 700, height: 300),
             spans: [HorizontalSpan(minX: 100, maxX: 800)]
         )
         let previous = PetRect(x: 370, y: 288, width: 84, height: 156)
@@ -50,8 +50,8 @@ final class SupportGeometryTests: XCTestCase {
     func testForegroundWindowAboveEdgeStillBlocksPetBody() throws {
         let foreground = PetRect(x: 350, y: 250, width: 150, height: 100)
         let support = PerchSupport(
-            id: SupportWindowID(windowID: 9, pid: 90),
-            windowBounds: PetRect(x: 100, y: 400, width: 700, height: 300),
+            id: SupportID(windowID: 9, pid: 90),
+            bounds: PetRect(x: 100, y: 400, width: 700, height: 300),
             spans: [HorizontalSpan(minX: 100, maxX: 800)],
             foregroundOcclusions: [foreground]
         )
@@ -67,15 +67,15 @@ final class SupportGeometryTests: XCTestCase {
     }
 
     func testRejectsClippedShortAndHeadroomStarvedSupports() {
-        let identity = SupportWindowID(windowID: 10, pid: 100)
+        let identity = SupportID(windowID: 10, pid: 100)
         let clipped = PerchSupport(
             id: identity,
-            windowBounds: PetRect(x: 100, y: 400, width: 700, height: 300),
+            bounds: PetRect(x: 100, y: 400, width: 700, height: 300),
             spans: [HorizontalSpan(minX: 100, maxX: 170)]
         )
         let starved = PerchSupport(
             id: identity,
-            windowBounds: PetRect(x: 100, y: 80, width: 700, height: 500),
+            bounds: PetRect(x: 100, y: 80, width: 700, height: 500),
             spans: [HorizontalSpan(minX: 100, maxX: 800)]
         )
 
@@ -86,8 +86,8 @@ final class SupportGeometryTests: XCTestCase {
 
     func testRejectsSpanOutsideItsWindow() {
         let malformed = PerchSupport(
-            id: SupportWindowID(windowID: 10, pid: 100),
-            windowBounds: PetRect(x: 300, y: 400, width: 400, height: 300),
+            id: SupportID(windowID: 10, pid: 100),
+            bounds: PetRect(x: 300, y: 400, width: 400, height: 300),
             spans: [HorizontalSpan(minX: 100, maxX: 700)]
         )
 
@@ -98,12 +98,20 @@ final class SupportGeometryTests: XCTestCase {
 
     func testSupportIdentityIncludesWindowAndProcess() {
         XCTAssertNotEqual(
-            SupportWindowID(windowID: 11, pid: 101),
-            SupportWindowID(windowID: 11, pid: 102)
+            SupportID(windowID: 11, pid: 101),
+            SupportID(windowID: 11, pid: 102)
         )
         XCTAssertNotEqual(
-            SupportWindowID(windowID: 11, pid: 101),
-            SupportWindowID(windowID: 12, pid: 101)
+            SupportID(windowID: 11, pid: 101),
+            SupportID(windowID: 12, pid: 101)
+        )
+        XCTAssertNotEqual(
+            SupportID(windowID: 11, pid: 101),
+            SupportID(windowID: 11, pid: 101, elementToken: 1)
+        )
+        XCTAssertNotEqual(
+            SupportID(windowID: 11, pid: 101, elementToken: 1),
+            SupportID(windowID: 11, pid: 101, elementToken: 2)
         )
     }
 }

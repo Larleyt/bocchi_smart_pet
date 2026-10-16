@@ -15,6 +15,15 @@ struct PixelSample: Sendable {
     let bounds: PetRect
     let obstacles: [PetRect]
     let fingerprint: PixelFingerprint
+    let supportEdges: [HorizontalSpan]
+
+    init(bounds: PetRect, obstacles: [PetRect], fingerprint: PixelFingerprint,
+         supportEdges: [HorizontalSpan] = []) {
+        self.bounds = bounds
+        self.obstacles = obstacles
+        self.fingerprint = fingerprint
+        self.supportEdges = supportEdges
+    }
 }
 
 enum ScreenAnalyzerError: Error, LocalizedError {
@@ -117,14 +126,14 @@ actor ScreenAnalyzer {
         let textRects = (request.results ?? []).compactMap { observation in
             Self.screenRect(for: observation.boundingBox, in: bounds)
         }
+        let details = try Self.visualDetailRects(
+            image: image, screenBounds: bounds, ignoringSupportEdgeY: ignoringSupportEdgeY
+        )
         return PixelSample(
             bounds: bounds,
-            obstacles: textRects + (try Self.visualDetailRects(
-                image: image,
-                screenBounds: bounds,
-                ignoringSupportEdgeY: ignoringSupportEdgeY
-            )),
-            fingerprint: try Self.fingerprint(image: image)
+            obstacles: textRects + details.rects,
+            fingerprint: try Self.fingerprint(image: image),
+            supportEdges: details.supportEdges
         )
     }
 
@@ -233,7 +242,7 @@ actor ScreenAnalyzer {
         image: CGImage,
         screenBounds: PetRect,
         ignoringSupportEdgeY: Double?
-    ) throws -> [PetRect] {
+    ) throws -> (rects: [PetRect], supportEdges: [HorizontalSpan]) {
         let sampleWidth = min(image.width, 512)
         let sampleHeight = min(image.height, 320)
         var pixels = [UInt8](repeating: 0, count: sampleWidth * sampleHeight)
@@ -261,6 +270,26 @@ actor ScreenAnalyzer {
             let start = max(0, Int(floor((edgeY - 1 - screenBounds.y) * scale)))
             let end = min(sampleHeight, Int(ceil((edgeY + 1 - screenBounds.y) * scale)))
             return start..<max(start, end)
+        }
+        // An AX layout rectangle is a support only where its top edge is actually drawn.
+        var supportEdges: [HorizontalSpan] = []
+        if let ignoredRows {
+            let edgeRows = max(1, ignoredRows.lowerBound)..<min(sampleHeight, ignoredRows.upperBound + 1)
+            var start: Int?
+            for x in 0...sampleWidth {
+                let hasEdge = x < sampleWidth && edgeRows.contains { y in
+                    abs(Int(pixels[y * sampleWidth + x])
+                        - Int(pixels[(y - 1) * sampleWidth + x])) >= 16
+                }
+                if hasEdge, start == nil { start = x }
+                if !hasEdge, let first = start {
+                    supportEdges.append(HorizontalSpan(
+                        minX: screenBounds.x + Double(first) * screenBounds.width / Double(sampleWidth),
+                        maxX: screenBounds.x + Double(x) * screenBounds.width / Double(sampleWidth)
+                    ))
+                    start = nil
+                }
+            }
         }
 
         for row in 0..<rows {
@@ -330,6 +359,6 @@ actor ScreenAnalyzer {
                 rectangles.append(PetRect(x: x, y: y, width: maxX - x, height: maxY - y))
             }
         }
-        return rectangles
+        return (rectangles, supportEdges)
     }
 }

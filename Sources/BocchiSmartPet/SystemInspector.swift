@@ -53,6 +53,17 @@ enum SystemInspectorError: Error, LocalizedError {
 
 actor SystemInspector {
     private var lastTraceSummary: String?
+    private struct RegistryKey: Hashable {
+        let windowID: UInt32
+        let pid: Int32
+    }
+    private struct RegistryEntry {
+        let hash: CFHashCode
+        let element: AXUIElement
+        let token: UInt64
+    }
+    private var supportRegistry: [RegistryKey: [RegistryEntry]] = [:]
+    private var nextSupportToken: UInt64 = 1
     private static let maximumWindows = 128
     private static let maximumAXNodes = 600
     private static let maximumAXDuration = Duration.milliseconds(220)
@@ -121,6 +132,8 @@ actor SystemInspector {
                 rawBounds: window.rawBounds, isOpaque: window.isOpaque
             )
         }
+        let previousRegistry = supportRegistry
+        supportRegistry = [:]
         guard AXIsProcessTrusted() else {
             if trace { report("permission") }
             return SystemSnapshot(
@@ -147,6 +160,7 @@ actor SystemInspector {
         if trace, !unknown.isEmpty { report("unrepresented-regions") }
         var obstacles: [PetRect] = []
         var supports: [PerchSupport] = []
+        var nextRegistry: [RegistryKey: [RegistryEntry]] = [:]
         var remainingNodes = Self.maximumAXNodes
         let clock = ContinuousClock()
         let deadline = clock.now.advanced(by: Self.maximumAXDuration)
@@ -194,10 +208,23 @@ actor SystemInspector {
             )
             obstacles.append(contentsOf: result.obstacles)
             unknown.append(contentsOf: result.unknown)
-            if !result.complete {
+            if result.complete {
+                let registered = Self.register(
+                    result.publishedSupports,
+                    previous: previousRegistry[RegistryKey(windowID: window.id, pid: window.pid)] ?? [],
+                    nextToken: &nextSupportToken
+                )
+                nextRegistry[RegistryKey(windowID: window.id, pid: window.pid)] = registered.entries
+                supports.append(contentsOf: Self.elementSupports(
+                    registered.supports, in: window,
+                    visibleRegions: visibleRegions[index], screen: screenBounds,
+                    foregroundWindows: Array(clippedWindows.prefix(index))
+                ))
+            } else {
                 unknown.append(contentsOf: visibleRegions[index])
             }
         }
+        supportRegistry = nextRegistry
 
         return SystemSnapshot(
             obstacles: obstacles,
@@ -257,17 +284,57 @@ actor SystemInspector {
         guard window.isOpaque, valid(window.rawBounds), valid(screen),
               top > screen.y, top < screen.maxY,
               top == window.bounds.y else { return nil }
+        let merged = supportSpans(
+            at: top, bounds: window.rawBounds,
+            visibleRegions: visibleRegions, screen: screen
+        )
+        guard !merged.isEmpty else { return nil }
+        return PerchSupport(
+            id: SupportID(windowID: window.id, pid: window.pid),
+            bounds: window.rawBounds,
+            spans: merged,
+            foregroundOcclusions: foregroundWindows.map(\.bounds)
+        )
+    }
 
+    nonisolated static func elementSupports(
+        _ published: [IdentifiedPublishedSupport],
+        in window: WindowRegion,
+        visibleRegions: [PetRect],
+        screen: PetRect,
+        foregroundWindows: [WindowRegion] = []
+    ) -> [PerchSupport] {
+        return published.compactMap { item in
+            guard valid(item.bounds), window.rawBounds.contains(item.bounds),
+                  item.bounds.y > screen.y, item.bounds.y < screen.maxY else { return nil }
+            let spans = supportSpans(
+                at: item.bounds.y, bounds: item.bounds,
+                visibleRegions: visibleRegions, screen: screen
+            )
+            guard !spans.isEmpty else { return nil }
+            return PerchSupport(
+                id: SupportID(windowID: window.id, pid: window.pid,
+                              elementToken: item.token),
+                bounds: item.bounds,
+                spans: spans,
+                foregroundOcclusions: foregroundWindows.map(\.bounds)
+            )
+        }
+    }
+
+    private nonisolated static func supportSpans(
+        at top: Double,
+        bounds: PetRect,
+        visibleRegions: [PetRect],
+        screen: PetRect
+    ) -> [HorizontalSpan] {
+        let edgeBounds = PetRect(x: bounds.x, y: top, width: bounds.width, height: 1)
         let spans = visibleRegions.compactMap { region -> HorizontalSpan? in
-            guard abs(region.y - top) < 0.5,
-                  region.height > 0,
-                  let edge = intersection(
-                    PetRect(x: region.x, y: top, width: region.width, height: 1),
-                    PetRect(x: screen.x, y: top, width: screen.width, height: 1)
-                  ) else { return nil }
+            guard region.y <= top, region.maxY > top,
+                  let visible = intersection(edgeBounds, region),
+                  let edge = intersection(visible, screen) else { return nil }
             return HorizontalSpan(minX: edge.x, maxX: edge.maxX)
         }.sorted { $0.minX < $1.minX }
-        guard !spans.isEmpty else { return nil }
         var merged: [HorizontalSpan] = []
         for span in spans {
             if let last = merged.last, span.minX <= last.maxX {
@@ -278,12 +345,7 @@ actor SystemInspector {
                 merged.append(span)
             }
         }
-        return PerchSupport(
-            id: SupportWindowID(windowID: window.id, pid: window.pid),
-            windowBounds: window.rawBounds,
-            spans: merged,
-            foregroundOcclusions: foregroundWindows.map(\.bounds)
-        )
+        return merged
     }
 
     private static func bestMatch(
@@ -296,6 +358,63 @@ actor SystemInspector {
         return index
     }
 
+    private nonisolated static func register(
+        _ published: [PublishedSupport<AXUIElement>],
+        previous: [RegistryEntry],
+        nextToken: inout UInt64
+    ) -> (supports: [IdentifiedPublishedSupport], entries: [RegistryEntry]) {
+        var supports: [IdentifiedPublishedSupport] = []
+        var entries: [RegistryEntry] = []
+        let previousBuckets = Dictionary(grouping: previous, by: \.hash)
+        var currentBuckets: [CFHashCode: [RegistryEntry]] = [:]
+        for item in published {
+            let hash = CFHash(item.element)
+            if currentBuckets[hash, default: []].contains(where: {
+                CFEqual($0.element, item.element)
+            }) {
+                continue
+            }
+            let token: UInt64
+            if let existing = previousBuckets[hash]?.first(where: {
+                CFEqual($0.element, item.element)
+            }) {
+                token = existing.token
+            } else {
+                token = nextToken
+                nextToken &+= 1
+            }
+            let entry = RegistryEntry(hash: hash, element: item.element, token: token)
+            currentBuckets[hash, default: []].append(entry)
+            entries.append(entry)
+            supports.append(IdentifiedPublishedSupport(
+                token: token, role: item.role, bounds: item.bounds
+            ))
+        }
+        return (supports, entries)
+    }
+
+    nonisolated static func registrationIdentityCheck() -> Bool {
+        let pid = getpid()
+        let sameElement = AXUIElementCreateApplication(pid)
+        let sameElementAgain = AXUIElementCreateApplication(pid)
+        let differentElement = AXUIElementCreateApplication(getppid())
+        let bounds = PetRect(x: 1, y: 1, width: 1, height: 1)
+        func published(_ element: AXUIElement) -> [PublishedSupport<AXUIElement>] {
+            [PublishedSupport(element: element, role: kAXGroupRole as String, bounds: bounds)]
+        }
+
+        var nextToken: UInt64 = 1
+        let first = register(published(sameElement), previous: [], nextToken: &nextToken)
+        let repeated = register(
+            published(sameElementAgain), previous: first.entries, nextToken: &nextToken
+        )
+        let different = register(
+            published(differentElement), previous: first.entries, nextToken: &nextToken
+        )
+        return first.supports.first?.token == repeated.supports.first?.token
+            && different.supports.first?.token != first.supports.first?.token
+    }
+
     private static func inspect(
         root: AXUIElement,
         visibleRegions: [PetRect],
@@ -303,8 +422,9 @@ actor SystemInspector {
         deadline: ContinuousClock.Instant,
         clock: ContinuousClock,
         trace: ((String, String?) -> Void)? = nil
-    ) -> (obstacles: [PetRect], unknown: [PetRect], complete: Bool) {
-        inspectTree(
+    ) -> (obstacles: [PetRect], unknown: [PetRect], complete: Bool,
+          publishedSupports: [PublishedSupport<AXUIElement>]) {
+        inspectTreeWithSupports(
             root: root,
             visibleRegions: visibleRegions,
             remainingNodes: &remainingNodes,
@@ -316,6 +436,18 @@ actor SystemInspector {
             readActions: { actions(of: $0, trace: trace) },
             trace: trace
         )
+    }
+
+    struct PublishedSupport<Element> {
+        let element: Element
+        let role: String
+        let bounds: PetRect
+    }
+
+    struct IdentifiedPublishedSupport {
+        let token: UInt64
+        let role: String
+        let bounds: PetRect
     }
 
     nonisolated static func inspectTree<Element>(
@@ -330,15 +462,39 @@ actor SystemInspector {
         readActions: (Element) -> [String]?,
         trace: ((String, String?) -> Void)? = nil
     ) -> (obstacles: [PetRect], unknown: [PetRect], complete: Bool) {
+        let result = inspectTreeWithSupports(
+            root: root, visibleRegions: visibleRegions, remainingNodes: &remainingNodes,
+            isExpired: isExpired, readRole: readRole, readVisibility: readVisibility,
+            readFrame: readFrame, readChildren: readChildren, readActions: readActions,
+            trace: trace
+        )
+        return (result.obstacles, result.unknown, result.complete)
+    }
+
+    nonisolated static func inspectTreeWithSupports<Element>(
+        root: Element,
+        visibleRegions: [PetRect],
+        remainingNodes: inout Int,
+        isExpired: () -> Bool,
+        readRole: (Element) -> String?,
+        readVisibility: (Element) -> Visibility,
+        readFrame: (Element) -> AccessibilityFrame,
+        readChildren: (Element) -> ChildrenResult<Element>,
+        readActions: (Element) -> [String]?,
+        trace: ((String, String?) -> Void)? = nil
+    ) -> (obstacles: [PetRect], unknown: [PetRect], complete: Bool,
+          publishedSupports: [PublishedSupport<Element>]) {
         var queue = [root]
         var cursor = 0
         var obstacles: [PetRect] = []
         var unknown: [PetRect] = []
+        var publishedSupports: [PublishedSupport<Element>] = []
 
         func incomplete(_ reason: String, _ role: String? = nil)
-            -> (obstacles: [PetRect], unknown: [PetRect], complete: Bool) {
+            -> (obstacles: [PetRect], unknown: [PetRect], complete: Bool,
+                publishedSupports: [PublishedSupport<Element>]) {
             trace?(reason, role)
-            return (obstacles, unknown, false)
+            return (obstacles, unknown, false, publishedSupports)
         }
         while cursor < queue.count {
             guard remainingNodes > 0, !isExpired() else {
@@ -386,6 +542,11 @@ actor SystemInspector {
                 }
                 trace?("unknown-role", role)
                 unknown.append(contentsOf: clip(rect, to: visibleRegions))
+                if role == kAXImageRole as String {
+                    publishedSupports.append(PublishedSupport(
+                        element: element, role: role, bounds: rect
+                    ))
+                }
                 continue
             case .container:
                 break
@@ -394,6 +555,11 @@ actor SystemInspector {
             guard !isExpired() else { return incomplete("time-budget", role) }
             switch readChildren(element) {
             case .available(let children) where !children.isEmpty:
+                if supportContainerRoles.contains(role), case .visible(let rect) = readFrame(element) {
+                    publishedSupports.append(PublishedSupport(
+                        element: element, role: role, bounds: rect
+                    ))
+                }
                 if queue.count - cursor + children.count > remainingNodes {
                     return incomplete("queue-budget", role)
                 }
@@ -419,7 +585,7 @@ actor SystemInspector {
                 return incomplete("children", role)
             }
         }
-        return (obstacles, unknown, true)
+        return (obstacles, unknown, true, publishedSupports)
     }
 
     enum ChildrenResult<Element> {
@@ -541,6 +707,12 @@ actor SystemInspector {
         kAXToolbarRole as String, kAXMenuBarRole as String, kAXMenuRole as String,
         kAXGridRole as String, kAXLayoutAreaRole as String, kAXPopoverRole as String,
         "AXWebArea",
+    ]
+
+    private static let supportContainerRoles: Set<String> = [
+        kAXGroupRole as String, kAXScrollAreaRole as String,
+        kAXTabGroupRole as String, kAXSplitGroupRole as String,
+        kAXLayoutAreaRole as String, kAXPopoverRole as String,
     ]
 
     private enum ElementKind {

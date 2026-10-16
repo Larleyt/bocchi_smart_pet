@@ -1,10 +1,12 @@
-public struct SupportWindowID: Sendable, Hashable {
+public struct SupportID: Sendable, Hashable {
     public let windowID: UInt32
     public let pid: Int32
+    public let elementToken: UInt64?
 
-    public init(windowID: UInt32, pid: Int32) {
+    public init(windowID: UInt32, pid: Int32, elementToken: UInt64? = nil) {
         self.windowID = windowID
         self.pid = pid
+        self.elementToken = elementToken
     }
 }
 
@@ -19,25 +21,26 @@ public struct HorizontalSpan: Sendable, Equatable {
 }
 
 public struct PerchSupport: Sendable, Equatable {
-    public let id: SupportWindowID
-    public let windowBounds: PetRect
+    public let id: SupportID
+    public let bounds: PetRect
     public let spans: [HorizontalSpan]
     public let foregroundOcclusions: [PetRect]
+    public var requiresVisualVerification: Bool { id.elementToken != nil }
 
-    public init(id: SupportWindowID, windowBounds: PetRect, spans: [HorizontalSpan],
+    public init(id: SupportID, bounds: PetRect, spans: [HorizontalSpan],
                 foregroundOcclusions: [PetRect] = []) {
         self.id = id
-        self.windowBounds = windowBounds
+        self.bounds = bounds
         self.spans = spans
         self.foregroundOcclusions = foregroundOcclusions
     }
 }
 
 public struct PerchCandidate: Sendable, Equatable {
-    public let supportID: SupportWindowID
+    public let supportID: SupportID
     public let placement: PetRect
 
-    public init(supportID: SupportWindowID, placement: PetRect) {
+    public init(supportID: SupportID, placement: PetRect) {
         self.supportID = supportID
         self.placement = placement
     }
@@ -64,8 +67,8 @@ public enum SupportGeometry {
         }
         var best: (distance: Double, candidate: PerchCandidate)?
 
-        for support in supports where valid(support.windowBounds) {
-            let y = support.windowBounds.y - seatOffset
+        for support in supports where valid(support.bounds) {
+            let y = support.bounds.y - seatOffset
             guard y.isFinite else { continue }
             let verticalPlacement = PetRect(x: 0, y: y, width: size.width, height: size.height)
             let forbidden = (blocked + support.foregroundOcclusions).compactMap {
@@ -77,8 +80,8 @@ public enum SupportGeometry {
             for span in support.spans where span.minX.isFinite && span.maxX.isFinite {
                 let minimum = span.minX
                 let maximum = span.maxX - size.width
-                guard minimum >= support.windowBounds.x,
-                      span.maxX <= support.windowBounds.maxX,
+                guard minimum >= support.bounds.x,
+                      span.maxX <= support.bounds.maxX,
                       minimum <= maximum else { continue }
                 let targetX = min(max(origin.x - size.width / 2, minimum), maximum)
                 var free: [(Double, Double)] = []
