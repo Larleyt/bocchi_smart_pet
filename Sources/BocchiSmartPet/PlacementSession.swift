@@ -21,7 +21,7 @@ final class PlacementSession {
     private var previousVisualAllowed: Bool?
     private var verified: Verification?
     private var activityAreas: [PetRect] = []
-    private var relocationPending = false
+    private var pendingEscapeOrigin: PetRect?
     private var verificationRequired = false
     private enum SearchState {
         case ready
@@ -74,6 +74,7 @@ final class PlacementSession {
             verified = nil
             verificationRequired = false
             manualPlacement = nil
+            pendingEscapeOrigin = nil
             attachment = nil
             perchSearchFinished = false
             perchingSuppressed = false
@@ -105,14 +106,12 @@ final class PlacementSession {
         guard enabled, let placement = overlay.lastPlacement else { return }
         detachPerch()
         perchingSuppressed = true
-        activityAreas.removeAll { $0 == placement }
-        activityAreas.append(placement)
-        activityAreas = Array(activityAreas.suffix(8))
-        relocationPending = true
+        pendingEscapeOrigin = placement
         invalidate()
     }
 
     func beginDragging() {
+        pendingEscapeOrigin = nil
         detachPerch()
         perchingSuppressed = true
         verified = nil
@@ -120,6 +119,7 @@ final class PlacementSession {
     }
 
     func drop(at placement: PetRect) {
+        pendingEscapeOrigin = nil
         activityAreas = []
         detachPerch()
         perchingSuppressed = true
@@ -217,9 +217,10 @@ final class PlacementSession {
             searchOrigin = rect
             let moving = overlay.lastPlacement != nil && overlay.lastPlacement != rect
                 && overlay.move(to: rect, generation: generation)
-            if !moving {
-                overlay.publish(placement: rect, generation: generation)
+            guard moving || overlay.publish(placement: rect, generation: generation) else {
+                return discard()
             }
+            pendingEscapeOrigin = nil
             return .shown(visual: visual)
         }
         func take(_ region: PetRect, supportEdgeY: Double? = nil) async throws -> PixelSample? {
@@ -291,7 +292,7 @@ final class PlacementSession {
             } else if boundsChanged || windowsChanged || contentsChanged {
                 searchState = .ready
             }
-            if screenChanged || (windowsChanged && !relocationPending) {
+            if screenChanged || windowsChanged {
                 if tracePlacement, !activityAreas.isEmpty {
                     NSLog("Bocchi activity reset: boundsChanged=%d oldWindows=%d newWindows=%d areas=%d",
                           boundsChanged, previousSystem?.windows.count ?? 0, system.windows.count,
@@ -299,12 +300,12 @@ final class PlacementSession {
                 }
                 activityAreas = []
             }
-            relocationPending = false
             previousBounds = bounds
             previousScreenBounds = screenBounds
             previousSystem = system
             previousVisualAllowed = visualAllowed
 
+            let escapeObstacles = pendingEscapeOrigin.map { [$0] } ?? []
             if !perchingSuppressed, attachment != nil || !perchSearchFinished {
                 var candidates = system.supports.filter {
                     visualAllowed || !$0.requiresVisualVerification
@@ -319,7 +320,7 @@ final class PlacementSession {
                 } else if attachment != nil {
                     detachPerch()
                 }
-                var blocked = system.obstacles + activityAreas
+                var blocked = system.obstacles + activityAreas + escapeObstacles
                     + rejectedPerches.map(\.placement)
                 if !visualAllowed { blocked += system.unknownAreas }
                 let cursorBlock = attachment == nil ? Self.cursorObstacle(cursor()) : nil
@@ -369,11 +370,11 @@ final class PlacementSession {
                         offsetX: rect.x - support.bounds.x)
                     rejectedPerches = []
                     searchOrigin = rect
-                    if following {
-                        overlay.followPerch(at: rect, generation: generation)
-                    } else {
-                        overlay.perch(at: rect, generation: generation)
-                    }
+                    let accepted = following
+                        ? overlay.followPerch(at: rect, generation: generation)
+                        : overlay.perch(at: rect, generation: generation)
+                    guard accepted else { return discard() }
+                    pendingEscapeOrigin = nil
                     if tracePlacement {
                         NSLog("Bocchi perch: window=%u element=%d following=%d position=%@",
                               candidate.supportID.windowID,
@@ -393,7 +394,7 @@ final class PlacementSession {
                 perchSearchFinished = !remaining && !blockedOnlyByCursor
                 detachPerch()
             }
-            let obstacles = system.obstacles + activityAreas
+            let obstacles = system.obstacles + activityAreas + escapeObstacles
             let searchingObstacles = obstacles + [Self.cursorObstacle(cursor())]
             let origin = (manualPlacement ?? (screenChanged ? nil : searchOrigin ?? overlay.lastPlacement))
                 .map(Self.standingOrigin)

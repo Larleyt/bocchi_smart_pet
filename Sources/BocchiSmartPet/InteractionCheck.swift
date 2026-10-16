@@ -204,6 +204,133 @@ enum InteractionCheck {
             try await steadyHover(at: point, check)
         }
         try await steadyHover(at: NSPoint(x: 48, y: 40), seated: true, check)
+        try await escapeRecovery(check)
+    }
+
+    private static func escapeRecovery(_ check: (Bool, String) throws -> Void) async throws {
+        var fakeNow = 200.0
+        var fakePointer = NSPoint(x: -1000, y: -1000)
+        let overlay = try PetOverlay(clock: { fakeNow }, pointer: { fakePointer })
+        defer { overlay.stop() }
+        guard let sprite = overlay.panel.contentView as? SpriteView else {
+            throw InteractionCheckFailure.event
+        }
+        let session = PlacementSession(overlay: overlay)
+        var bounds = PetRect(x: 0, y: 0, width: 900, height: 640)
+        var visual = true
+        var windows: [WindowRegion] = []
+        var fresh = true
+        var staleCapture = false
+        var escapes = 0
+        var fingerprint = try PixelFingerprint(rgb: [UInt8](repeating: 220, count: 64 * 3))
+        overlay.onInteraction = { event in
+            switch event {
+            case .hoverEscapeRequested:
+                escapes += 1
+                session.escape()
+            case .movementEnded: session.invalidate()
+            default: break
+            }
+        }
+        func refresh() async -> CaptureOutcome {
+            fresh = true
+            return await session.refresh(bounds: bounds, screenBounds: bounds, visualAllowed: visual,
+                inspect: { SystemSnapshot(obstacles: [], unknownAreas: visual ? [bounds] : [],
+                    windows: windows, accessibilityAvailable: true) }, capture: { region in
+                    if staleCapture { fresh = false }
+                    return PixelSample(bounds: region, obstacles: [], fingerprint: fingerprint)
+                }, current: { fresh }, cursor: {
+                    PetPoint(x: fakePointer.x, y: ScreenCoordinates.primaryHeight - fakePointer.y)
+                }, now: { fakeNow })
+        }
+        func hover() {
+            fakePointer = NSPoint(x: -1000, y: -1000)
+            sprite.tick()
+            fakePointer = overlay.panel.convertPoint(toScreen:
+                sprite.convert(NSPoint(x: 40, y: 30), to: nil))
+            sprite.tick()
+            fakeNow += 5
+            sprite.tick()
+        }
+        func finishMovement() async throws {
+            fakeNow += 2
+            try await Task.sleep(for: .milliseconds(40))
+        }
+        _ = await refresh()
+        let original = overlay.lastPlacement
+        hover()
+        staleCapture = true
+        let stale = await refresh()
+        try check(escapes == 1 && stale == .discarded && overlay.panel.isVisible,
+                  "actual hover escape survives an external capture becoming stale")
+        staleCapture = false
+        windows = [WindowRegion(id: 91, pid: 77,
+            bounds: PetRect(x: 880, y: 620, width: 1, height: 1))]
+        _ = await refresh()
+        try check(overlay.isMoving,
+                  "unrelated window churn cannot cancel a pending hover escape")
+        try await finishMovement()
+        try check(overlay.lastPlacement != original && overlay.panel.isVisible && !overlay.isMoving,
+                  "escape after stale capture reaches a different actual panel position")
+
+        session.invalidate(preservingVerification: false)
+        bounds = PetRect(x: 0, y: 0, width: 300, height: 156)
+        windows = []
+        visual = false
+        fakePointer = NSPoint(x: -1000, y: -1000)
+        _ = await refresh()
+        let firstSlot = overlay.lastPlacement
+        for attempt in 1...3 {
+            let previous = overlay.lastPlacement
+            hover()
+            let result = await refresh()
+            try check(result == .shown(visual: false) && overlay.isMoving && overlay.panel.isVisible,
+                      "two-slot scene starts hover escape \(attempt) without exhausting safe places")
+            try await finishMovement()
+            try check(overlay.lastPlacement != previous && overlay.panel.isVisible && !overlay.isMoving,
+                      "two-slot escape \(attempt) finishes as a visible run")
+            if attempt == 2 {
+                try check(overlay.lastPlacement == firstSlot,
+                          "a previous voluntary departure does not mark that safe place as pixel activity")
+            }
+        }
+        let beforeReset = overlay.lastPlacement
+        hover()
+        session.invalidate(preservingVerification: false)
+        fakePointer = NSPoint(x: -1000, y: -1000)
+        _ = await refresh()
+        try check(overlay.lastPlacement == beforeReset && overlay.panel.isVisible && !overlay.isMoving,
+                  "hard reset cancels an unfulfilled hover escape")
+        hover()
+        session.beginDragging()
+        guard let drop = overlay.lastPlacement else { throw InteractionCheckFailure.event }
+        session.drop(at: drop)
+        fakePointer = NSPoint(x: -1000, y: -1000)
+        _ = await refresh()
+        try check(overlay.lastPlacement == drop && overlay.panel.isVisible && !overlay.isMoving,
+                  "manual drag and drop overrides an unfulfilled hover escape")
+
+        visual = true
+        _ = await refresh()
+        let activeSlot = overlay.lastPlacement
+        fingerprint = try PixelFingerprint(rgb: [UInt8](repeating: 10, count: 64 * 3))
+        session.invalidate()
+        _ = await refresh()
+        try await finishMovement()
+        try check(overlay.lastPlacement != activeSlot && overlay.panel.isVisible,
+                  "real fingerprint activity moves the pet out of that slot")
+        let pendingOrigin = overlay.lastPlacement
+        hover()
+        let noSafeSlot = await refresh()
+        try check(noSafeSlot == .noSpace && !overlay.panel.isVisible,
+                  "hover escape still refuses a slot excluded by actual pixel activity")
+        fakePointer = NSPoint(x: -1000, y: -1000)
+        windows = [WindowRegion(id: 92, pid: 77,
+            bounds: PetRect(x: 290, y: 140, width: 1, height: 1))]
+        let retry = await refresh()
+        try check(retry == .shown(visual: true) && overlay.panel.isVisible
+                  && overlay.lastPlacement == activeSlot && overlay.lastPlacement != pendingOrigin,
+                  "pending escape survives noSpace even after the cursor leaves and the scene changes")
     }
 
     private static func steadyHover(at point: NSPoint, seated: Bool = false,
