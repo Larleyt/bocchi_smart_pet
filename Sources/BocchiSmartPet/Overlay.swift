@@ -416,7 +416,7 @@ final class SpriteView: NSView {
             displayedFrameIsPerch = false
             displayedFrameIsRunning = false
         } else {
-            let durations = [0.28, 0.11, 0.11, 0.14, 0.14, 0.32]
+            let durations = [3.0, 0.12, 0.4, 3.0, 0.12, 0.4]
             var phase = (now - started)
                 .truncatingRemainder(dividingBy: durations.reduce(0, +))
             var index = 0

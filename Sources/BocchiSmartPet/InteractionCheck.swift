@@ -206,12 +206,13 @@ enum InteractionCheck {
         }
         try await steadyHover(at: NSPoint(x: 48, y: 40), seated: true, check)
         try await escapeRecovery(check)
-        try gazeOrigin(check)
+        try standingAnimation(check)
     }
 
-    private static func gazeOrigin(_ check: (Bool, String) throws -> Void) throws {
+    private static func standingAnimation(_ check: (Bool, String) throws -> Void) throws {
+        var fakeNow = 100.0
         var fakePointer = NSPoint.zero
-        let sprite = try SpriteView(pointer: { fakePointer }, clock: { 100 }, startsTimer: false)
+        let sprite = try SpriteView(pointer: { fakePointer }, clock: { fakeNow }, startsTimer: false)
         defer { sprite.stop() }
         let panel = PetPanel(contentRect: NSRect(x: 180, y: 180, width: 120, height: 156),
                              styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
@@ -229,7 +230,7 @@ enum InteractionCheck {
               let atlas = CGImageSourceCreateImageAtIndex(source, 0, nil) else {
             throw AtlasError.invalidAsset
         }
-        let reference = GazeFrameFixtureView(frame: sprite.bounds)
+        let reference = StandingFrameFixtureView(frame: sprite.bounds)
         func rendered(_ view: NSView) throws -> Data {
             guard let bitmap = view.bitmapImageRepForCachingDisplay(in: view.bounds) else {
                 throw InteractionCheckFailure.event
@@ -274,6 +275,35 @@ enum InteractionCheck {
         }
         try check(panel.frame == frame && sprite.bounds == reference.bounds,
                   "eye-based gaze preserves the hoodie-centered panel and sprite geometry")
+
+        fakePointer = NSPoint(x: -10_000, y: -10_000)
+        let idleTargets: [(Double, Int, String)] = [
+            (0.001, 0, "starts with the first calm open frame"),
+            (2.999, 0, "keeps the first calm open frame for three seconds"),
+            (3.001, 1, "enters the first short blink after the calm pause"),
+            (3.119, 1, "keeps the first blink under 0.12 seconds"),
+            (3.121, 2, "shows the first brief head gesture after the blink"),
+            (3.519, 2, "keeps the first head gesture for 0.4 seconds"),
+            (3.521, 3, "returns to the second calm open frame"),
+            (6.519, 3, "keeps the second calm open frame for three seconds"),
+            (6.521, 4, "enters the second short blink after the calm pause"),
+            (6.639, 4, "keeps the second blink under 0.12 seconds"),
+            (6.641, 5, "shows the second brief head gesture after the blink"),
+            (7.039, 5, "keeps the second head gesture for 0.4 seconds"),
+            (7.041, 0, "wraps the calm idle cycle back to its first frame")]
+        for (offset, column, label) in idleTargets {
+            fakeNow = 100 + offset
+            sprite.tick()
+            guard let image = atlas.cropping(to: CGRect(
+                x: column * 192 + 40, y: 0, width: 112, height: 208
+            )) else { throw AtlasError.invalidAsset }
+            reference.image = NSImage(cgImage: image, size: NSSize(width: 112, height: 208))
+            let actual = try rendered(sprite)
+            panel.contentView = reference
+            let expected = try rendered(reference)
+            panel.contentView = sprite
+            try check(actual == expected, "standing animation \(label)")
+        }
     }
 
     private static func escapeRecovery(_ check: (Bool, String) throws -> Void) async throws {
@@ -514,7 +544,7 @@ private enum InteractionCheckFailure: Error {
 }
 
 @MainActor
-private final class GazeFrameFixtureView: NSView {
+private final class StandingFrameFixtureView: NSView {
     var image: NSImage?
     override var isFlipped: Bool { true }
 
