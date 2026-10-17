@@ -1,4 +1,5 @@
 import ApplicationServices
+import AppKit
 import BocchiCore
 import CoreGraphics
 import Foundation
@@ -53,6 +54,10 @@ enum SystemInspectorError: Error, LocalizedError {
 
 actor SystemInspector {
     private var lastTraceSummary: String?
+    struct ApplicationIdentity: Equatable {
+        let bundleIdentifier: String
+        let bundlePath: String
+    }
     private struct RegistryKey: Hashable {
         let windowID: UInt32
         let pid: Int32
@@ -81,10 +86,35 @@ actor SystemInspector {
         return try decodeWindows(information, in: screen, excludingPID: excludingPID)
     }
 
+    nonisolated static func window(
+        id: UInt32, pid: Int32, in screen: PetRect
+    ) throws -> WindowRegion? {
+        try validate(screen)
+        guard let information = CGWindowListCopyWindowInfo(
+            [.optionIncludingWindow], CGWindowID(id)
+        ) as? [[String: Any]] else {
+            throw SystemInspectorError.windowListUnavailable
+        }
+        return try decodeTargetWindow(information, id: id, pid: pid, in: screen)
+    }
+
+    nonisolated static func decodeTargetWindow(
+        _ information: [[String: Any]], id: UInt32, pid: Int32, in screen: PetRect
+    ) throws -> WindowRegion? {
+        guard let item = information.first(where: {
+            ($0[kCGWindowNumber as String] as? NSNumber)?.uint32Value == id
+                && ($0[kCGWindowOwnerPID as String] as? NSNumber)?.int32Value == pid
+        }),
+              (item[kCGWindowIsOnscreen as String] as? NSNumber)?.boolValue == true
+        else { return nil }
+        return try decodeWindows([item], in: screen, excludingPID: -1).first
+    }
+
     nonisolated static func decodeWindows(
         _ information: [[String: Any]],
         in screen: PetRect,
-        excludingPID: Int32
+        excludingPID: Int32,
+        identityForPID: (Int32) -> ApplicationIdentity? = applicationIdentity
     ) throws -> [WindowRegion] {
         try validate(screen)
         return information.compactMap { item in
@@ -101,11 +131,39 @@ actor SystemInspector {
                   let bounds = CGRect(dictionaryRepresentation: dictionary as CFDictionary)
             else { return nil }
             let rawBounds = petRect(bounds)
+            // macOS reports the transparent full-display recording veil as an opaque window.
+            if isScreenRecordingOverlay(
+                pid: pid, layer: layer, alpha: alpha, rawBounds: rawBounds, screen: screen,
+                identityForPID: identityForPID
+            ) {
+                return nil
+            }
             guard let clipped = intersection(rawBounds, screen) else { return nil }
             return WindowRegion(
                 id: id, pid: pid, bounds: clipped, rawBounds: rawBounds, isOpaque: alpha >= 1
             )
         }
+    }
+
+    private nonisolated static func applicationIdentity(pid: Int32) -> ApplicationIdentity? {
+        guard let application = NSRunningApplication(processIdentifier: pid_t(pid)),
+              let bundleIdentifier = application.bundleIdentifier,
+              let bundlePath = application.bundleURL?.standardizedFileURL.path else { return nil }
+        return ApplicationIdentity(bundleIdentifier: bundleIdentifier, bundlePath: bundlePath)
+    }
+
+    private nonisolated static func isScreenRecordingOverlay(
+        pid: Int32,
+        layer: Int,
+        alpha: Double,
+        rawBounds: PetRect,
+        screen: PetRect,
+        identityForPID: (Int32) -> ApplicationIdentity?
+    ) -> Bool {
+        guard layer == Int(CGWindowLevelForKey(.mainMenuWindow)), alpha >= 1,
+              rawBounds == screen, let identity = identityForPID(pid) else { return false }
+        return identity.bundleIdentifier == "com.apple.screencaptureui"
+            && identity.bundlePath == "/System/Library/CoreServices/screencaptureui.app"
     }
 
     func inspect(screenBounds: PetRect, windows: [WindowRegion], trace: Bool = false) throws -> SystemSnapshot {
@@ -165,7 +223,6 @@ actor SystemInspector {
         let clock = ContinuousClock()
         let deadline = clock.now.advanced(by: Self.maximumAXDuration)
         var applicationWindows: [Int32: [(AXUIElement, PetRect)]] = [:]
-
         for (index, window) in clippedWindows.enumerated() where !visibleRegions[index].isEmpty {
             guard window.isOpaque else {
                 continue

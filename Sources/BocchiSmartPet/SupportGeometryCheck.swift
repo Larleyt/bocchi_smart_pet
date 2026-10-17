@@ -3,7 +3,7 @@ import BocchiCore
 
 @MainActor
 enum SupportGeometryCheck {
-    static func run(_ check: (Bool, String) throws -> Void) throws {
+    static func run(_ check: (Bool, String) throws -> Void) async throws {
         let screen = PetRect(x: 0, y: 0, width: 1200, height: 800)
         let foreground = WindowRegion(
             id: 20, pid: 2,
@@ -24,6 +24,148 @@ enum SupportGeometryCheck {
                     HorizontalSpan(minX: 600, maxX: 1000),
                 ],
             "foreground windows split a native top edge into truly visible spans"
+        )
+
+        let capturedScreen = PetRect(x: 0, y: 0, width: 2560, height: 1440)
+        let recordingPID: Int32 = 20630
+        let recordingID: UInt32 = 115775
+        let hostPID: Int32 = 63297
+        let hostID: UInt32 = 115659
+        let menuLayer = Int(CGWindowLevelForKey(.mainMenuWindow))
+        let recorderIdentity = SystemInspector.ApplicationIdentity(
+            bundleIdentifier: "com.apple.screencaptureui",
+            bundlePath: "/System/Library/CoreServices/screencaptureui.app"
+        )
+        func metadata(_ id: UInt32, pid: Int32, layer: Int, alpha: Double,
+                      bounds: PetRect) -> [String: Any] {
+            [
+                kCGWindowNumber as String: NSNumber(value: id),
+                kCGWindowOwnerPID as String: NSNumber(value: pid),
+                kCGWindowLayer as String: NSNumber(value: layer),
+                kCGWindowAlpha as String: NSNumber(value: alpha),
+                kCGWindowBounds as String: CGRect(
+                    x: bounds.x, y: bounds.y, width: bounds.width, height: bounds.height
+                ).dictionaryRepresentation,
+            ]
+        }
+        let recordingOverlay = metadata(
+            recordingID, pid: recordingPID, layer: menuLayer, alpha: 1,
+            bounds: capturedScreen
+        )
+        let capturedHostBounds = PetRect(x: 830, y: 233, width: 900, height: 600)
+        let capturedHost = metadata(
+            hostID, pid: hostPID, layer: 0, alpha: 1, bounds: capturedHostBounds
+        )
+        func decode(
+            _ items: [[String: Any]],
+            identity: SystemInspector.ApplicationIdentity? = recorderIdentity
+        ) throws -> [WindowRegion] {
+            try SystemInspector.decodeWindows(
+                items, in: capturedScreen, excludingPID: -1,
+                identityForPID: { $0 == recordingPID ? identity : nil }
+            )
+        }
+
+        let recordingDecoded = try decode([recordingOverlay, capturedHost])
+        let recordingVisibility = SystemInspector.visibility(
+            of: recordingDecoded, in: capturedScreen
+        )
+        let recordingSupport = recordingDecoded.first.flatMap {
+            SystemInspector.perchSupport(
+                for: $0, visibleRegions: recordingVisibility.windows[0], in: capturedScreen
+            )
+        }
+        try check(
+            recordingDecoded.map(\.id) == [hostID]
+                && recordingVisibility.windows[0] == [capturedHostBounds]
+                && recordingSupport?.id == SupportID(windowID: hostID, pid: hostPID),
+            "verified full-display Screen Recording veil is removed before visibility and support"
+        )
+
+        let wrongBundle = SystemInspector.ApplicationIdentity(
+            bundleIdentifier: "example.recorder", bundlePath: recorderIdentity.bundlePath
+        )
+        let wrongPath = SystemInspector.ApplicationIdentity(
+            bundleIdentifier: recorderIdentity.bundleIdentifier,
+            bundlePath: "/Applications/screencaptureui.app"
+        )
+        let wrongLayer = metadata(
+            recordingID, pid: recordingPID, layer: 0, alpha: 1, bounds: capturedScreen
+        )
+        let translucent = metadata(
+            recordingID, pid: recordingPID, layer: menuLayer, alpha: 0.75,
+            bounds: capturedScreen
+        )
+        let partialBounds = PetRect(x: 0, y: 0, width: 2559, height: 1440)
+        let partialOverlay = metadata(
+            recordingID, pid: recordingPID, layer: menuLayer, alpha: 1,
+            bounds: partialBounds
+        )
+        let toolbarBounds = PetRect(x: 920, y: 1160, width: 720, height: 92)
+        let toolbar = metadata(
+            recordingID, pid: recordingPID, layer: menuLayer, alpha: 1,
+            bounds: toolbarBounds
+        )
+        let negativeControls = [
+            try decode([recordingOverlay, capturedHost], identity: nil),
+            try decode([recordingOverlay, capturedHost], identity: wrongBundle),
+            try decode([recordingOverlay, capturedHost], identity: wrongPath),
+            try decode([wrongLayer, capturedHost]),
+            try decode([translucent, capturedHost]),
+            try decode([partialOverlay, capturedHost]),
+            try decode([toolbar, capturedHost]),
+        ]
+        try check(
+            negativeControls.allSatisfy { $0.map(\.id) == [recordingID, hostID] },
+            "missing or wrong identity, path, layer, alpha, bounds and toolbar geometry stay visible"
+        )
+        let opaqueOther = try decode([recordingOverlay, capturedHost], identity: wrongBundle)
+        let translucentOther = try decode([translucent, capturedHost], identity: wrongBundle)
+        try check(
+            SystemInspector.visibility(of: opaqueOther, in: capturedScreen).windows[1].isEmpty
+                && SystemInspector.visibility(
+                    of: translucentOther, in: capturedScreen
+                ).windows[1].isEmpty,
+            "ordinary opaque and translucent foreground windows retain occlusion semantics"
+        )
+
+        guard let recordingSupport else {
+            throw SupportGeometryCheckError.missingRecordingSupport
+        }
+        let runtimeOverlay = try PetOverlay()
+        defer { runtimeOverlay.stop() }
+        let runtimeSession = PlacementSession(overlay: runtimeOverlay)
+        let fingerprint = try PixelFingerprint(rgb: [UInt8](repeating: 220, count: 64 * 3))
+        let runtimeSnapshot = SystemSnapshot(
+            obstacles: [], unknownAreas: recordingVisibility.unknown,
+            windows: recordingDecoded, accessibilityAvailable: true,
+            supports: [recordingSupport]
+        )
+        let runtimeOutcome = await runtimeSession.refresh(
+            bounds: capturedScreen, screenBounds: capturedScreen, visualAllowed: true,
+            inspect: { runtimeSnapshot },
+            capture: {
+                PixelSample(bounds: $0, obstacles: [], fingerprint: fingerprint)
+            },
+            capturePerch: { region, _ in
+                PixelSample(
+                    bounds: region, obstacles: [], fingerprint: fingerprint,
+                    supportEdges: [HorizontalSpan(minX: region.x, maxX: region.maxX)]
+                )
+            },
+            current: { true }, cursor: { PetPoint(x: -1000, y: -1000) }, now: { 100 }
+        )
+        let sittingDeadline = ContinuousClock.now + .seconds(2)
+        while !runtimeOverlay.isSitting && ContinuousClock.now < sittingDeadline {
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        let runtimePlacement = runtimeOverlay.lastPlacement
+        try check(
+            runtimeOutcome == .shown(visual: true) && runtimeOverlay.isPerched
+                && runtimeOverlay.isSitting && runtimeOverlay.panel.isVisible
+                && runtimePlacement?.y == capturedHostBounds.y - 112
+                && runtimePlacement == ScreenCoordinates.quartz(runtimeOverlay.panel.frame),
+            "decoded recording scene reaches PlacementSession and seats the actual NSPanel"
         )
 
         let clippedTop = WindowRegion(
@@ -130,4 +272,8 @@ enum SupportGeometryCheck {
         try check(SystemInspector.registrationIdentityCheck(),
                   "real AX element identity is stable across wrappers and distinct across processes")
     }
+}
+
+private enum SupportGeometryCheckError: Error {
+    case missingRecordingSupport
 }

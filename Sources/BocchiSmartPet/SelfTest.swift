@@ -34,7 +34,7 @@ enum RuntimeSelfTest {
             try await InteractionCheck.run(check)
             try RunAnimationCheck.run(check)
             try await PerchAnimationCheck.run(check)
-            try SupportGeometryCheck.run(check)
+            try await SupportGeometryCheck.run(check)
             try await PerchPixelCheck.run(check)
             try await PerchSessionCheck.run(check)
             try await VisualGeometryCheck.run(check)

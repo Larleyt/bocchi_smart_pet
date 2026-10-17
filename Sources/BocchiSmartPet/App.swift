@@ -144,9 +144,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             windows: try SystemInspector.windows(in: bounds, excludingPID: ProcessInfo.processInfo.processIdentifier))
     }
 
-    private func invalidate(preservingVerification: Bool = true) {
-        session?.invalidate(preservingVerification: preservingVerification)
+    private func invalidate(preservingVerification: Bool = true,
+                            keepingVisible: Bool = false) {
+        session?.invalidate(preservingVerification: preservingVerification,
+                            keepingVisible: keepingVisible)
         pending = true
+    }
+
+    private static func liveDisplayInventory() -> [(id: UInt32, bounds: PetRect)] {
+        NSScreen.screens.compactMap { screen in
+            guard let number = screen.deviceDescription[
+                NSDeviceDescriptionKey("NSScreenNumber")
+            ] as? NSNumber else { return nil }
+            return (number.uint32Value, ScreenCoordinates.quartz(screen.frame))
+        }
+    }
+
+    static func canKeepVisibleForDisplayRetarget(
+        oldDisplayID: UInt32?, oldBounds: PetRect?, panelVisible: Bool,
+        liveDisplays: [(id: UInt32, bounds: PetRect)]
+    ) -> Bool {
+        guard panelVisible, let oldDisplayID, let oldBounds else { return false }
+        return liveDisplays.contains { $0.id == oldDisplayID && $0.bounds == oldBounds }
     }
 
     nonisolated static func isContentMovement(_ type: NSEvent.EventType) -> Bool {
@@ -156,12 +175,52 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
+    static func canStartFullRefresh(pressedMouseButtons: Int) -> Bool {
+        (pressedMouseButtons & 1) == 0
+    }
+
+    static func routeLiveWindowFollow(
+        eventType: NSEvent.EventType,
+        session: PlacementSession,
+        bounds: PetRect,
+        screenBounds: PetRect,
+        cachedWindows: [WindowRegion],
+        readOwner: (UInt32, Int32) throws -> WindowRegion?,
+        now: () -> Double
+    ) -> LiveWindowFollowOutcome? {
+        guard eventType == .leftMouseDragged else { return nil }
+        let outcome = session.followAttachedWindow(
+            in: bounds, screenBounds: screenBounds, cachedWindows: cachedWindows,
+            readOwner: readOwner, now: now
+        )
+        switch outcome {
+        case .followed, .throttled, .stopped:
+            return outcome
+        case .notApplicable, .unchanged:
+            return nil
+        }
+    }
+
     private func input(type: NSEvent.EventType) {
         let contentMoved = Self.isContentMovement(type)
         let now = ProcessInfo.processInfo.systemUptime
         if tracePlacement, contentMoved, now - lastMovementLog >= 0.5 {
             NSLog("Bocchi input: type=%@", String(describing: type))
             lastMovementLog = now
+        }
+        if let session, let context,
+           Self.routeLiveWindowFollow(
+               eventType: type, session: session,
+               bounds: context.usable, screenBounds: context.bounds,
+               cachedWindows: context.windows,
+               readOwner: { id, pid in
+                   try SystemInspector.window(id: id, pid: pid, in: context.bounds)
+               },
+               now: { now }
+           ) != nil {
+            pending = true
+            lastInput = now
+            return
         }
         if session?.input(moved: type == .mouseMoved, contentMoved: contentMoved) == true {
             pending = true
@@ -218,9 +277,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             return
         }
         if context != nextContext {
-            let sameDisplay = context?.id == nextContext.id && context?.bounds == nextContext.bounds
+            let oldContext = context
+            let sameDisplay = oldContext?.id == nextContext.id
+                && oldContext?.bounds == nextContext.bounds
+            let keepingVisible = !sameDisplay && Self.canKeepVisibleForDisplayRetarget(
+                oldDisplayID: oldContext?.id, oldBounds: oldContext?.bounds,
+                panelVisible: session.overlay.panel.isVisible,
+                liveDisplays: Self.liveDisplayInventory())
             context = nextContext
-            invalidate(preservingVerification: sameDisplay)
+            invalidate(preservingVerification: sameDisplay, keepingVisible: keepingVisible)
         }
         let identities = Set(nextContext.windows.map { WindowIdentity(id: $0.id, pid: $0.pid) })
         if observedWindows != identities || observedAccessibility != state.accessibility {
@@ -229,7 +294,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             observedAccessibility = state.accessibility
         }
         let now = ProcessInfo.processInfo.systemUptime
-        guard !session.busy, now - lastInput >= 0.25,
+        guard Self.canStartFullRefresh(pressedMouseButtons: NSEvent.pressedMouseButtons),
+              !session.busy, now - lastInput >= 0.25,
               now - lastAttempt >= (pending ? 0.5 : 1.0) else { return }
         pending = false
         lastAttempt = now

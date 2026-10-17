@@ -46,6 +46,9 @@ enum InteractionCheck {
                   && ScreenCoordinates.quartz(overlay.panel.frame) == end,
                   "runtime NSPanel finishes at the requested frame")
 
+        try await crossDisplayRetarget(check)
+        try await sameMonitorRelocation(check)
+
         let shortEscape = PetRect(x: end.x + 96, y: end.y, width: end.width, height: end.height)
         try check(overlay.move(to: shortEscape, generation: overlay.generation),
                   "short escape starts with the existing run animation")
@@ -207,6 +210,366 @@ enum InteractionCheck {
         try await steadyHover(at: NSPoint(x: 48, y: 40), seated: true, check)
         try await escapeRecovery(check)
         try standingAnimation(check)
+    }
+
+    private static func crossDisplayRetarget(
+        _ check: (Bool, String) throws -> Void
+    ) async throws {
+        var now = 500.0
+        let overlay = try PetOverlay(clock: { now })
+        defer { overlay.stop() }
+        let session = PlacementSession(overlay: overlay)
+        let oldID: UInt32 = 101
+        let newID: UInt32 = 202
+        let oldDisplay = PetRect(x: 0, y: 0, width: 900, height: 640)
+        let newDisplay = PetRect(x: 1000, y: 900, width: 900, height: 640)
+        let fingerprint = try PixelFingerprint(rgb: [UInt8](repeating: 220, count: 64 * 3))
+
+        func refresh(in bounds: PetRect) async -> CaptureOutcome {
+            await session.refresh(bounds: bounds, screenBounds: bounds, visualAllowed: true,
+                inspect: { SystemSnapshot(obstacles: [], unknownAreas: [bounds], windows: [],
+                    accessibilityAvailable: true) }, capture: { region in
+                    PixelSample(bounds: region, obstacles: [], fingerprint: fingerprint)
+                }, current: { true }, cursor: { PetPoint(x: -1000, y: -1000) },
+                now: { now })
+        }
+
+        _ = await refresh(in: oldDisplay)
+        guard let oldPlacement = overlay.lastPlacement else {
+            try check(false, "cross-display fixture publishes its verified old placement")
+            return
+        }
+        let liveDisplays = [(id: oldID, bounds: oldDisplay), (id: newID, bounds: newDisplay)]
+        let keepingVisible = AppDelegate.canKeepVisibleForDisplayRetarget(
+            oldDisplayID: oldID, oldBounds: oldDisplay, panelVisible: overlay.panel.isVisible,
+            liveDisplays: liveDisplays)
+        try check(keepingVisible,
+                  "live unchanged old display permits a visible cross-display retarget")
+        try check(!AppDelegate.canKeepVisibleForDisplayRetarget(
+            oldDisplayID: oldID, oldBounds: oldDisplay, panelVisible: false,
+            liveDisplays: liveDisplays), "hidden panel cannot request visible retarget")
+        try check(!AppDelegate.canKeepVisibleForDisplayRetarget(
+            oldDisplayID: oldID, oldBounds: oldDisplay, panelVisible: true,
+            liveDisplays: [(id: newID, bounds: newDisplay)]),
+            "removed old display requires a hard hide")
+        try check(!AppDelegate.canKeepVisibleForDisplayRetarget(
+            oldDisplayID: oldID, oldBounds: oldDisplay, panelVisible: true,
+            liveDisplays: [(id: oldID,
+                            bounds: PetRect(x: 0, y: 0, width: 800, height: 640))]),
+            "changed old display bounds require a hard hide")
+
+        session.invalidate(preservingVerification: false, keepingVisible: keepingVisible)
+        try check(overlay.panel.isVisible && overlay.displayedPlacement == oldPlacement,
+                  "cross-display state reset keeps the last safe panel visible")
+        let outcome = await refresh(in: newDisplay)
+        try check(outcome == .shown(visual: true) && overlay.isMoving && overlay.panel.isVisible,
+                  "verified new display starts a real cross-display movement")
+        now += 0.5
+        try await Task.sleep(for: .milliseconds(40))
+        let intermediate = overlay.displayedPlacement
+        now += 2
+        try await Task.sleep(for: .milliseconds(40))
+        guard let destination = overlay.lastPlacement, let intermediate else {
+            try check(false, "cross-display movement exposes intermediate and final frames")
+            return
+        }
+        try check(intermediate.x > min(oldPlacement.x, destination.x)
+                  && intermediate.x < max(oldPlacement.x, destination.x)
+                  && intermediate.y > min(oldPlacement.y, destination.y)
+                  && intermediate.y < max(oldPlacement.y, destination.y),
+                  "cross-display NSPanel crosses real intermediate X and Y")
+        try check(!overlay.isMoving && destination != oldPlacement
+                  && newDisplay.contains(destination)
+                  && ScreenCoordinates.quartz(overlay.panel.frame) == destination,
+                  "cross-display movement finishes at the verified new display placement")
+    }
+
+    private static func sameMonitorRelocation(
+        _ check: (Bool, String) throws -> Void
+    ) async throws {
+        let bounds = PetRect(x: 0, y: 0, width: 900, height: 640)
+        let farCursor = PetPoint(x: -1000, y: -1000)
+        let calm = try PixelFingerprint(rgb: [UInt8](repeating: 220, count: 64 * 3))
+        let changed = try PixelFingerprint(rgb: [UInt8](repeating: 10, count: 64 * 3))
+
+        func axisBlockers(around placement: PetRect) -> [PetRect] {
+            let gap = 13.0
+            return [
+                PetRect(x: bounds.x, y: placement.y,
+                        width: max(0, placement.x - gap - bounds.x), height: placement.height),
+                PetRect(x: placement.maxX + gap, y: placement.y,
+                        width: max(0, bounds.maxX - placement.maxX - gap), height: placement.height),
+                PetRect(x: placement.x, y: bounds.y, width: placement.width,
+                        height: max(0, placement.y - gap - bounds.y)),
+                PetRect(x: placement.x, y: placement.maxY + gap, width: placement.width,
+                        height: max(0, bounds.maxY - placement.maxY - gap)),
+            ].filter { $0.width > 0 && $0.height > 0 }
+        }
+        func finishMovement(_ overlay: PetOverlay, from start: PetRect, now: inout Double,
+                            label: String) async throws {
+            now += 0.1
+            try await Task.sleep(for: .milliseconds(40))
+            guard let middle = overlay.displayedPlacement else {
+                try check(false, "\(label) exposes an intermediate frame")
+                return
+            }
+            now += 2.4
+            try await Task.sleep(for: .milliseconds(40))
+            guard let target = overlay.lastPlacement else {
+                try check(false, "\(label) exposes its endpoint frame")
+                return
+            }
+            try check(middle.x > min(start.x, target.x) && middle.x < max(start.x, target.x)
+                      && middle.y > min(start.y, target.y) && middle.y < max(start.y, target.y),
+                      "\(label) crosses real intermediate X and Y")
+            try check(!overlay.isMoving && overlay.panel.isVisible
+                      && overlay.displayedPlacement == target
+                      && ScreenCoordinates.quartz(overlay.panel.frame) == target
+                      && bounds.contains(target),
+                      "\(label) finishes at its checked endpoint")
+        }
+
+        do {
+            var now = 700.0
+            let overlay = try PetOverlay(clock: { now })
+            defer { overlay.stop() }
+            let session = PlacementSession(overlay: overlay)
+            func refresh(_ obstacles: [PetRect]) async -> CaptureOutcome {
+                await session.refresh(bounds: bounds, screenBounds: bounds, visualAllowed: false,
+                    inspect: { SystemSnapshot(obstacles: obstacles, unknownAreas: [], windows: [],
+                        accessibilityAvailable: true) }, capture: { region in
+                        PixelSample(bounds: region, obstacles: [], fingerprint: calm)
+                    }, current: { true }, cursor: { farCursor }, now: { now })
+            }
+            _ = await refresh([])
+            guard let start = overlay.lastPlacement else { throw InteractionCheckFailure.event }
+            let relocated = await refresh(axisBlockers(around: start)
+                + [PetRect(x: start.x + 24, y: start.y + 24, width: 16, height: 16)])
+            try check(relocated == .shown(visual: false) && overlay.isMoving
+                      && overlay.panel.isVisible,
+                      "AX collision starts a visible forced relocation")
+            try await finishMovement(overlay, from: start, now: &now, label: "AX forced relocation")
+        }
+
+        do {
+            var now = 800.0
+            let overlay = try PetOverlay(clock: { now })
+            defer { overlay.stop() }
+            let session = PlacementSession(overlay: overlay)
+            var oldRegion: PetRect?
+            var changing = false
+            func refresh(_ obstacles: [PetRect]) async -> CaptureOutcome {
+                await session.refresh(bounds: bounds, screenBounds: bounds, visualAllowed: true,
+                    inspect: { SystemSnapshot(obstacles: obstacles, unknownAreas: [bounds], windows: [],
+                        accessibilityAvailable: true) }, capture: { region in
+                        if oldRegion == nil { oldRegion = region }
+                        return PixelSample(bounds: region, obstacles: [],
+                            fingerprint: changing && region == oldRegion ? changed : calm)
+                    }, current: { true }, cursor: { farCursor }, now: { now })
+            }
+            _ = await refresh([])
+            guard let start = overlay.lastPlacement else { throw InteractionCheckFailure.event }
+            changing = true
+            session.input(moved: false, contentMoved: true)
+            let relocated = await refresh(axisBlockers(around: start))
+            try check(relocated == .shown(visual: true) && overlay.isMoving
+                      && overlay.panel.isVisible,
+                      "pixel activity starts a visible forced relocation")
+            try await finishMovement(overlay, from: start, now: &now,
+                                     label: "pixel forced relocation")
+        }
+
+        do {
+            let overlay = try PetOverlay()
+            defer { overlay.stop() }
+            let session = PlacementSession(overlay: overlay)
+            _ = await session.refresh(bounds: bounds, screenBounds: bounds, visualAllowed: true,
+                inspect: { SystemSnapshot(obstacles: [], unknownAreas: [], windows: [],
+                    accessibilityAvailable: true) }, capture: { region in
+                    PixelSample(bounds: region, obstacles: [], fingerprint: calm)
+                }, current: { true }, cursor: { farCursor })
+            guard let unsafeStart = overlay.lastPlacement else {
+                throw InteractionCheckFailure.event
+            }
+            let support = PerchSupport(
+                id: SupportID(windowID: 808, pid: 77, elementToken: 1),
+                bounds: PetRect(x: 500, y: 420, width: 300, height: 180),
+                spans: [HorizontalSpan(minX: 500, maxX: 800)]
+            )
+            var perchRegion: PetRect?
+            var perchContinuation: CheckedContinuation<PixelSample, Never>?
+            let suspended = Task { @MainActor in
+                await session.refresh(bounds: bounds, screenBounds: bounds, visualAllowed: true,
+                    inspect: { SystemSnapshot(obstacles: [unsafeStart], unknownAreas: [],
+                        windows: [], accessibilityAvailable: true, supports: [support]) },
+                    capture: { region in
+                        PixelSample(bounds: region, obstacles: [], fingerprint: calm)
+                    }, capturePerch: { region, _ in
+                        perchRegion = region
+                        return await withCheckedContinuation { perchContinuation = $0 }
+                    }, current: { true }, cursor: { farCursor })
+            }
+            for _ in 0..<20 where perchContinuation == nil {
+                try await Task.sleep(for: .milliseconds(20))
+            }
+            try check(perchContinuation != nil && session.busy && overlay.panel.isVisible,
+                      "AX-unsafe perch fixture suspends inside the alternative support capture")
+            try await Task.sleep(for: .milliseconds(2_600))
+            let deadlineApplied = !session.busy && !overlay.panel.isVisible
+            if !deadlineApplied { session.invalidate(preservingVerification: false) }
+            let replacement = PetRect(x: 700, y: 460,
+                                      width: PetOverlay.size.width, height: PetOverlay.size.height)
+            _ = overlay.publish(placement: replacement, generation: overlay.generation)
+            guard let perchRegion else { throw InteractionCheckFailure.event }
+            perchContinuation?.resume(returning: PixelSample(
+                bounds: perchRegion, obstacles: [], fingerprint: calm,
+                supportEdges: [HorizontalSpan(minX: perchRegion.x, maxX: perchRegion.maxX)]
+            ))
+            let lateOutcome = await suspended.value
+            try check(deadlineApplied,
+                      "AX collision deadline starts before a suspended alternative perch capture")
+            try check(lateOutcome == .discarded && overlay.panel.isVisible
+                      && overlay.lastPlacement == replacement && !session.busy,
+                      "late alternative perch sample cannot replace newer published state")
+        }
+
+        do {
+            let overlay = try PetOverlay()
+            defer { overlay.stop() }
+            let session = PlacementSession(overlay: overlay)
+            _ = await session.refresh(bounds: bounds, screenBounds: bounds, visualAllowed: false,
+                inspect: { SystemSnapshot(obstacles: [], unknownAreas: [], windows: [],
+                    accessibilityAvailable: true) }, capture: { region in
+                    PixelSample(bounds: region, obstacles: [], fingerprint: calm)
+                }, current: { true }, cursor: { farCursor })
+            guard let start = overlay.lastPlacement else { throw InteractionCheckFailure.event }
+            let noSpace = await session.refresh(bounds: bounds, screenBounds: bounds,
+                visualAllowed: false, inspect: {
+                    SystemSnapshot(obstacles: [bounds], unknownAreas: [], windows: [],
+                                   accessibilityAvailable: true)
+                }, capture: { region in
+                    PixelSample(bounds: region, obstacles: [], fingerprint: calm)
+                }, current: { true }, cursor: { farCursor })
+            try check(noSpace == .noSpace && !overlay.panel.isVisible
+                      && overlay.lastPlacement == nil && start != overlay.lastPlacement,
+                      "forced relocation still hides when no checked endpoint exists")
+        }
+
+        do {
+            var oldRegion: PetRect?
+            var changing = false
+            var current = true
+            let overlay = try PetOverlay()
+            defer { overlay.stop() }
+            let session = PlacementSession(overlay: overlay)
+            func refresh(fails: Bool = false, staleCandidate: Bool = false) async -> CaptureOutcome {
+                await session.refresh(bounds: bounds, screenBounds: bounds, visualAllowed: true,
+                    inspect: { SystemSnapshot(obstacles: [], unknownAreas: [bounds], windows: [],
+                        accessibilityAvailable: true) }, capture: { region in
+                        if oldRegion == nil { oldRegion = region }
+                        if fails && changing && region == oldRegion {
+                            throw InteractionCheckFailure.capture
+                        }
+                        if staleCandidate && changing && region != oldRegion { current = false }
+                        return PixelSample(bounds: region, obstacles: [],
+                            fingerprint: changing && region == oldRegion ? changed : calm)
+                    }, current: { current }, cursor: { farCursor })
+            }
+            _ = await refresh()
+            changing = true
+            session.input(moved: false, contentMoved: true)
+            let failed = await refresh(fails: true)
+            try check(ifCaseFailed(failed) && !overlay.panel.isVisible,
+                      "capture error hard-hides an unsafe origin")
+
+            session.invalidate(preservingVerification: false)
+            current = true
+            changing = false
+            oldRegion = nil
+            _ = await refresh()
+            changing = true
+            session.input(moved: false, contentMoved: true)
+            let stale = await refresh(staleCandidate: true)
+            try check(stale == .discarded && !overlay.panel.isVisible,
+                      "stale capture hard-hides the unchanged unsafe origin")
+        }
+
+        do {
+            let overlay = try PetOverlay()
+            defer { overlay.stop() }
+            let session = PlacementSession(overlay: overlay)
+            var oldRegion: PetRect?
+            var changing = false
+            var continuation: CheckedContinuation<PixelSample, Never>?
+            func refresh() async -> CaptureOutcome {
+                await session.refresh(bounds: bounds, screenBounds: bounds, visualAllowed: true,
+                    inspect: { SystemSnapshot(obstacles: [], unknownAreas: [bounds], windows: [],
+                        accessibilityAvailable: true) }, capture: { region in
+                        if oldRegion == nil { oldRegion = region }
+                        if changing && region != oldRegion {
+                            return await withCheckedContinuation { continuation = $0 }
+                        }
+                        return PixelSample(bounds: region, obstacles: [],
+                            fingerprint: changing ? changed : calm)
+                    }, current: { true }, cursor: { farCursor })
+            }
+            _ = await refresh()
+            changing = true
+            session.input(moved: false, contentMoved: true)
+            let suspended = Task { @MainActor in await refresh() }
+            for _ in 0..<20 where continuation == nil {
+                try await Task.sleep(for: .milliseconds(20))
+            }
+            try check(continuation != nil && session.busy && overlay.panel.isVisible,
+                      "slow-capture fixture suspends after marking the visible origin unsafe")
+            try check(session.input(moved: false, contentMoved: true),
+                      "ordinary content input invalidates the suspended capture")
+            try await Task.sleep(for: .milliseconds(2_600))
+            try check(!session.busy && !overlay.panel.isVisible,
+                      "one-shot deadline hides the same unsafe origin after stale input and releases session")
+            let replacement = PetRect(x: 700, y: 460,
+                                      width: PetOverlay.size.width, height: PetOverlay.size.height)
+            try check(overlay.publish(placement: replacement, generation: overlay.generation),
+                      "new publication proceeds after the suspended refresh deadline")
+            continuation?.resume(returning: PixelSample(
+                bounds: PetRect(x: 0, y: 0, width: 1, height: 1),
+                obstacles: [], fingerprint: calm))
+            let oldOutcome = await suspended.value
+            try check(oldOutcome == .discarded && overlay.panel.isVisible
+                      && overlay.lastPlacement == replacement && !session.busy,
+                      "late capture cannot hide or retain ownership of newer state")
+
+            session.invalidate(preservingVerification: false)
+            changing = false
+            oldRegion = nil
+            continuation = nil
+            _ = await refresh()
+            changing = true
+            session.input(moved: false, contentMoved: true)
+            let abandoned = Task { @MainActor in await refresh() }
+            for _ in 0..<20 where continuation == nil {
+                try await Task.sleep(for: .milliseconds(20))
+            }
+            try check(continuation != nil && session.busy && overlay.panel.isVisible,
+                      "manual-cancel fixture suspends at an unsafe visible origin")
+            session.beginDragging()
+            try check(!session.busy && overlay.panel.isVisible,
+                      "manual drag revokes the old refresh ownership without hiding")
+            try await Task.sleep(for: .milliseconds(2_600))
+            try check(overlay.panel.isVisible,
+                      "revoked unsafe deadline cannot hide the manual state")
+            continuation?.resume(returning: PixelSample(
+                bounds: PetRect(x: 0, y: 0, width: 1, height: 1),
+                obstacles: [], fingerprint: calm))
+            _ = await abandoned.value
+            try check(overlay.panel.isVisible && !session.busy,
+                      "late capture remains inert after manual ownership change")
+        }
+    }
+
+    private static func ifCaseFailed(_ outcome: CaptureOutcome) -> Bool {
+        if case .failed = outcome { return true }
+        return false
     }
 
     private static func standingAnimation(_ check: (Bool, String) throws -> Void) throws {
@@ -541,6 +904,7 @@ enum InteractionCheck {
 
 private enum InteractionCheckFailure: Error {
     case event
+    case capture
 }
 
 @MainActor
