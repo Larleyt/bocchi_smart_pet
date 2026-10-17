@@ -405,8 +405,10 @@ final class SpriteView: NSView {
         let cocoaPointer = pointer()
         let quartzPointer = PetPoint(x: cocoaPointer.x,
                                     y: ScreenCoordinates.primaryHeight - cocoaPointer.y)
-        let dx = quartzPointer.x - (pet.x + pet.width / 2)
-        let dy = quartzPointer.y - (pet.y + pet.height / 2)
+        // Atlas eye midpoint (99, 52), after the x=40 crop and 0.75 drawing scale.
+        let eyes = PetPoint(x: pet.x + pet.width / 2 + 2.25, y: pet.y + 39)
+        let dx = quartzPointer.x - eyes.x
+        let dy = quartzPointer.y - eyes.y
         if hypot(dx, dy) < 300 {
             let angle = (atan2(dx, -dy) + 2 * .pi).truncatingRemainder(dividingBy: 2 * .pi)
             let index = Int((angle / (.pi / 8)).rounded()) % 16

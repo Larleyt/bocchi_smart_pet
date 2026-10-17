@@ -1,5 +1,6 @@
 import AppKit
 import BocchiCore
+import ImageIO
 
 @MainActor
 enum InteractionCheck {
@@ -205,6 +206,74 @@ enum InteractionCheck {
         }
         try await steadyHover(at: NSPoint(x: 48, y: 40), seated: true, check)
         try await escapeRecovery(check)
+        try gazeOrigin(check)
+    }
+
+    private static func gazeOrigin(_ check: (Bool, String) throws -> Void) throws {
+        var fakePointer = NSPoint.zero
+        let sprite = try SpriteView(pointer: { fakePointer }, clock: { 100 }, startsTimer: false)
+        defer { sprite.stop() }
+        let panel = PetPanel(contentRect: NSRect(x: 180, y: 180, width: 120, height: 156),
+                             styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
+        panel.contentView = sprite
+        panel.isReleasedWhenClosed = false
+        panel.backgroundColor = .clear
+        panel.isOpaque = false
+        panel.orderFrontRegardless()
+        defer { panel.orderOut(nil) }
+        let frame = panel.frame
+        let atlasURL = Bundle.main.url(forResource: "bocchi-spritesheet", withExtension: "png")
+            ?? URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+                .appendingPathComponent("Assets/bocchi-spritesheet.png")
+        guard let source = CGImageSourceCreateWithURL(atlasURL as CFURL, nil),
+              let atlas = CGImageSourceCreateImageAtIndex(source, 0, nil) else {
+            throw AtlasError.invalidAsset
+        }
+        let reference = GazeFrameFixtureView(frame: sprite.bounds)
+        func rendered(_ view: NSView) throws -> Data {
+            guard let bitmap = view.bitmapImageRepForCachingDisplay(in: view.bounds) else {
+                throw InteractionCheckFailure.event
+            }
+            view.cacheDisplay(in: view.bounds, to: bitmap)
+            guard let png = bitmap.representation(using: .png, properties: [:]) else {
+                throw InteractionCheckFailure.event
+            }
+            return png
+        }
+        // Eye midpoint measured in the unchanged atlas, after its crop and 0.75 scale.
+        let eyes = NSPoint(x: 62.25, y: 39)
+        let targets: [(NSPoint, Int?, String)] = [
+            (NSPoint(x: 0, y: -40), 0, "above"),
+            (NSPoint(x: 40, y: -40), 2, "upper right"),
+            (NSPoint(x: 40, y: 0), 4, "right at eye height"),
+            (NSPoint(x: 40, y: 40), 6, "lower right"),
+            (NSPoint(x: 0, y: 12), 8, "below eyes but above the hoodie center"),
+            (NSPoint(x: -40, y: 40), 10, "lower left"),
+            (NSPoint(x: -40, y: 0), 12, "left at eye height"),
+            (NSPoint(x: -40, y: -40), 14, "upper left"),
+            (NSPoint(x: 0, y: -299), 0, "299pt above the eyes inside gaze range"),
+            (NSPoint(x: 0, y: 300), nil, "300pt below the eyes at the idle boundary"),
+            (NSPoint(x: 0, y: 301), nil, "301pt below the eyes outside gaze range")]
+        for (offset, index, label) in targets {
+            fakePointer = panel.convertPoint(toScreen: sprite.convert(
+                NSPoint(x: eyes.x + offset.x, y: eyes.y + offset.y), to: nil))
+            sprite.tick()
+            let column = index.map { $0 % 8 } ?? 0
+            let row = index.map { 9 + $0 / 8 } ?? 0
+            guard let image = atlas.cropping(to: CGRect(x: column * 192 + 40,
+                y: row * 208, width: 112, height: 208)) else {
+                throw AtlasError.invalidAsset
+            }
+            reference.image = NSImage(cgImage: image, size: NSSize(width: 112, height: 208))
+            let actual = try rendered(sprite)
+            panel.contentView = reference
+            let expected = try rendered(reference)
+            panel.contentView = sprite
+            try check(actual == expected,
+                      "gaze uses the eye midpoint for a cursor \(label)")
+        }
+        try check(panel.frame == frame && sprite.bounds == reference.bounds,
+                  "eye-based gaze preserves the hoodie-centered panel and sprite geometry")
     }
 
     private static func escapeRecovery(_ check: (Bool, String) throws -> Void) async throws {
@@ -442,4 +511,16 @@ enum InteractionCheck {
 
 private enum InteractionCheckFailure: Error {
     case event
+}
+
+@MainActor
+private final class GazeFrameFixtureView: NSView {
+    var image: NSImage?
+    override var isFlipped: Bool { true }
+
+    override func draw(_ dirtyRect: NSRect) {
+        image?.draw(in: NSRect(x: 18, y: 0, width: 84, height: 156), from: .zero,
+                    operation: .sourceOver, fraction: 1, respectFlipped: true,
+                    hints: [.interpolation: NSImageInterpolation.high])
+    }
 }
